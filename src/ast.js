@@ -1,5 +1,6 @@
 //
-// This is pretty much a straight port of ast.c from CPython 2.6.5.
+// This is pretty much a straight port of ast.c from CPython 3.7.3
+// (with a few leftovers from 2.6.5).
 //
 // The previous version was easier to work with and more JS-ish, but having a
 // somewhat different ast structure than cpython makes testing more difficult.
@@ -9,9 +10,26 @@
 //
 
 var SYM = Sk.ParseTables.sym;
-var TOK = Sk.Tokenizer.Tokens;
+var TOK = Sk.token.tokens;
 var COMP_GENEXP = 0;
-var COMP_SETCOMP = 1;
+var COMP_LISTCOMP = 1;
+var COMP_SETCOMP = 2;
+var NULL = null;
+var _slice_kind = { 
+    Slice_kind: 1,
+    ExtSlice_kind: 2, 
+    Index_kind: 3
+};
+
+var _expr_kind = {
+    BoolOp_kind: 1, NamedExpr_kind: 2, BinOp_kind: 3, UnaryOp_kind: 4,
+    Lambda_kind: 5, IfExp_kind: 6, Dict_kind: 7, Set_kind: 8,
+    ListComp_kind: 9, SetComp_kind: 10, DictComp_kind: 11,
+    GeneratorExp_kind: 12, Await_kind: 13, Yield_kind: 14,
+    YieldFrom_kind: 15, Compare_kind: 16, Call_kind: 17,
+    FormattedValue_kind: 18, JoinedStr_kind: 19, Constant_kind: 20,
+    Attribute_kind: 21, Subscript_kind: 22, Starred_kind: 23,
+    Name_kind: 24, List_kind: 25, Tuple_kind: 26 };
 
 /** @constructor */
 function Compiling (encoding, filename, c_flags) {
@@ -24,7 +42,7 @@ function Compiling (encoding, filename, c_flags) {
  * @return {number}
  */
 function NCH (n) {
-    goog.asserts.assert(n !== undefined);
+    Sk.asserts.assert(n !== undefined, "node must be defined");
     if (n.children === null) {
         return 0;
     }
@@ -32,17 +50,33 @@ function NCH (n) {
 }
 
 function CHILD (n, i) {
-    goog.asserts.assert(n !== undefined);
-    goog.asserts.assert(i !== undefined);
+    Sk.asserts.assert(n !== undefined, "node must be defined");
+    Sk.asserts.assert(i !== undefined, "index of child must be specified");
     return n.children[i];
 }
 
 function REQ (n, type) {
-    goog.asserts.assert(n.type === type, "node wasn't expected type");
+    Sk.asserts.assert(n.type === type, "node wasn't expected type");
+}
+
+function TYPE(n) {
+    return n.type;
+}
+
+function LINENO(n) {
+    return n.lineno;
+}
+
+function STR(ch) {
+    return ch.value;
+}
+
+function ast_error(c, n, msg) {
+    throw new Sk.builtin.SyntaxError(msg, c.c_filename, n.lineno);
 }
 
 function strobj (s) {
-    goog.asserts.assert(typeof s === "string", "expecting string, got " + (typeof s));
+    Sk.asserts.assert(typeof s === "string", "expecting string, got " + (typeof s));
     return new Sk.builtin.str(s);
 }
 
@@ -87,12 +121,15 @@ function numStmts (n) {
             }
             break;
         default:
-            goog.asserts.fail("Non-statement found");
+            Sk.asserts.fail("Non-statement found");
     }
     return 0;
 }
 
 function forbiddenCheck (c, n, x, lineno) {
+    if (x instanceof Sk.builtin.str) {
+        x = x.v;
+    }
     if (x === "None") {
         throw new Sk.builtin.SyntaxError("assignment to None", c.c_filename, lineno);
     }
@@ -111,78 +148,81 @@ function setContext (c, e, ctx, n) {
     var i;
     var exprName;
     var s;
-    goog.asserts.assert(ctx !== AugStore && ctx !== AugLoad);
+    Sk.asserts.assert(ctx !== Sk.astnodes.AugStore && ctx !== Sk.astnodes.AugLoad, "context not AugStore or AugLoad");
     s = null;
     exprName = null;
 
     switch (e.constructor) {
-        case Attribute:
-        case Name:
-            if (ctx === Store) {
+        case Sk.astnodes.Attribute:
+        case Sk.astnodes.Name:
+            if (ctx === Sk.astnodes.Store) {
                 forbiddenCheck(c, n, e.attr, n.lineno);
             }
             e.ctx = ctx;
             break;
-        case Subscript:
+        case Sk.astnodes.Subscript:
             e.ctx = ctx;
             break;
-        case List:
+        case Sk.astnodes.List:
             e.ctx = ctx;
             s = e.elts;
             break;
-        case Tuple:
+        case Sk.astnodes.Tuple:
             if (e.elts.length === 0) {
                 throw new Sk.builtin.SyntaxError("can't assign to ()", c.c_filename, n.lineno);
             }
             e.ctx = ctx;
             s = e.elts;
             break;
-        case Lambda:
+        case Sk.astnodes.Lambda:
             exprName = "lambda";
             break;
-        case Call:
+        case Sk.astnodes.Call:
             exprName = "function call";
             break;
-        case BoolOp:
-        case BinOp:
-        case UnaryOp:
+        case Sk.astnodes.BoolOp:
+        case Sk.astnodes.BinOp:
+        case Sk.astnodes.UnaryOp:
             exprName = "operator";
             break;
-        case GeneratorExp:
+        case Sk.astnodes.GeneratorExp:
             exprName = "generator expression";
             break;
-        case Yield:
+        case Sk.astnodes.Yield:
             exprName = "yield expression";
             break;
-        case ListComp:
+        case Sk.astnodes.ListComp:
             exprName = "list comprehension";
             break;
-        case SetComp:
+        case Sk.astnodes.SetComp:
             exprName = "set comprehension";
             break;
-        case DictComp:
+        case Sk.astnodes.DictComp:
             exprName = "dict comprehension";
             break;
-        case Dict:
-        case Set:
-        case Num:
-        case Str:
+        case Sk.astnodes.Dict:
+        case Sk.astnodes.Set:
+        case Sk.astnodes.Num:
+        case Sk.astnodes.Str:
             exprName = "literal";
             break;
-        case Compare:
+        case Sk.astnodes.NameConstant:
+            exprName = "True, False or None";
+            break;
+        case Sk.astnodes.Compare:
             exprName = "comparison";
             break;
-        case Repr:
+        case Sk.astnodes.Repr:
             exprName = "repr";
             break;
-        case IfExp:
+        case Sk.astnodes.IfExp:
             exprName = "conditional expression";
             break;
         default:
-            goog.asserts.fail("unhandled expression in assignment");
+            Sk.asserts.fail("unhandled expression in assignment");
     }
     if (exprName) {
-        throw new Sk.builtin.SyntaxError("can't " + (ctx === Store ? "assign to" : "delete") + " " + exprName, c.c_filename, n.lineno);
+        throw new Sk.builtin.SyntaxError("can't " + (ctx === Sk.astnodes.Store ? "assign to" : "delete") + " " + exprName, c.c_filename, n.lineno);
     }
 
     if (s) {
@@ -194,26 +234,47 @@ function setContext (c, e, ctx, n) {
 
 var operatorMap = {};
 (function () {
-    operatorMap[TOK.T_VBAR] = BitOr;
-    operatorMap[TOK.T_CIRCUMFLEX] = BitXor;
-    operatorMap[TOK.T_AMPER] = BitAnd;
-    operatorMap[TOK.T_LEFTSHIFT] = LShift;
-    operatorMap[TOK.T_RIGHTSHIFT] = RShift;
-    operatorMap[TOK.T_PLUS] = Add;
-    operatorMap[TOK.T_MINUS] = Sub;
-    operatorMap[TOK.T_STAR] = Mult;
-    operatorMap[TOK.T_SLASH] = Div;
-    operatorMap[TOK.T_DOUBLESLASH] = FloorDiv;
-    operatorMap[TOK.T_PERCENT] = Mod;
+    operatorMap[TOK.T_VBAR] = Sk.astnodes.BitOr;
+    operatorMap[TOK.T_CIRCUMFLEX] = Sk.astnodes.BitXor;
+    operatorMap[TOK.T_AMPER] = Sk.astnodes.BitAnd;
+    operatorMap[TOK.T_LEFTSHIFT] = Sk.astnodes.LShift;
+    operatorMap[TOK.T_RIGHTSHIFT] = Sk.astnodes.RShift;
+    operatorMap[TOK.T_PLUS] = Sk.astnodes.Add;
+    operatorMap[TOK.T_MINUS] = Sk.astnodes.Sub;
+    operatorMap[TOK.T_STAR] = Sk.astnodes.Mult;
+    operatorMap[TOK.T_SLASH] = Sk.astnodes.Div;
+    operatorMap[TOK.T_DOUBLESLASH] = Sk.astnodes.FloorDiv;
+    operatorMap[TOK.T_PERCENT] = Sk.astnodes.Mod;
 }());
 
+Sk.setupOperators = function (py3) {
+    if (py3) {
+        operatorMap[TOK.T_AT] = Sk.astnodes.MatMult;
+    } else {
+        if (operatorMap[TOK.T_AT]) {
+            delete operatorMap[TOK.T_AT];
+        }
+    }
+}
+Sk.exportSymbol("Sk.setupOperators", Sk.setupOperators);
+
 function getOperator (n) {
-    goog.asserts.assert(operatorMap[n.type] !== undefined);
+    if (operatorMap[n.type] === undefined) {
+        throw new Sk.builtin.SyntaxError("invalid syntax", n.type, n.lineno);
+    }
     return operatorMap[n.type];
 }
 
+function new_identifier(n, c) {
+    if (n.value) {
+        return Sk.builtin.str(n.value);
+    }
+
+    return Sk.builtin.str(n);
+}
+
 function astForCompOp (c, n) {
-    /* comp_op: '<'|'>'|'=='|'>='|'<='|'<>'|'!='|'in'|'not' 'in'|'is'
+    /* comp_op: '<'|'>'|'=='|'>='|'<='|'!='|'in'|'not' 'in'|'is'
      |'is' 'not'
      */
     REQ(n, SYM.comp_op);
@@ -221,51 +282,65 @@ function astForCompOp (c, n) {
         n = CHILD(n, 0);
         switch (n.type) {
             case TOK.T_LESS:
-                return Lt;
+                return Sk.astnodes.Lt;
             case TOK.T_GREATER:
-                return Gt;
+                return Sk.astnodes.Gt;
             case TOK.T_EQEQUAL:
-                return Eq;
+                return Sk.astnodes.Eq;
             case TOK.T_LESSEQUAL:
-                return LtE;
+                return Sk.astnodes.LtE;
             case TOK.T_GREATEREQUAL:
-                return GtE;
+                return Sk.astnodes.GtE;
             case TOK.T_NOTEQUAL:
-                return NotEq;
+                return Sk.astnodes.NotEq;
             case TOK.T_NAME:
                 if (n.value === "in") {
-                    return In_;
+                    return Sk.astnodes.In;
                 }
                 if (n.value === "is") {
-                    return Is;
+                    return Sk.astnodes.Is;
                 }
         }
     }
     else if (NCH(n) === 2) {
         if (CHILD(n, 0).type === TOK.T_NAME) {
             if (CHILD(n, 1).value === "in") {
-                return NotIn;
+                return Sk.astnodes.NotIn;
             }
             if (CHILD(n, 0).value === "is") {
-                return IsNot;
+                return Sk.astnodes.IsNot;
             }
         }
     }
-    goog.asserts.fail("invalid comp_op");
+    Sk.asserts.fail("invalid comp_op");
 }
 
-function seqForTestlist (c, n) {
-    /* testlist: test (',' test)* [','] */
+function copy_location(e, n)
+{
+    if (e) {
+        e.lineno = LINENO(n);
+        e.col_offset = n.col_offset;
+        e.end_lineno = n.end_lineno;
+        e.end_col_offset = n.end_col_offset;
+    }
+    return e;
+}
+
+function seq_for_testlist (c, n) {
+    /* testlist: test (',' test)* [',']
+       testlist_star_expr: test|star_expr (',' test|star_expr)* [',']
+    */
     var i;
     var seq = [];
-    goog.asserts.assert(n.type === SYM.testlist ||
+    Sk.asserts.assert(n.type === SYM.testlist ||
+        n.type === SYM.testlist_star_expr ||
         n.type === SYM.listmaker ||
         n.type === SYM.testlist_comp ||
         n.type === SYM.testlist_safe ||
-        n.type === SYM.testlist1);
+        n.type === SYM.testlist1, "node type must be listlike");
     for (i = 0; i < NCH(n); i += 2) {
-        goog.asserts.assert(CHILD(n, i).type === SYM.test || CHILD(n, i).type === SYM.old_test);
-        seq[i / 2] = astForExpr(c, CHILD(n, i));
+        Sk.asserts.assert(CHILD(n, i).type === SYM.test || CHILD(n, i).type === SYM.old_test || CHILD(n, i).type === SYM.star_expr);
+        seq[i / 2] = ast_for_expr(c, CHILD(n, i));
     }
     return seq;
 }
@@ -309,7 +384,7 @@ function astForSuite (c, n) {
                 REQ(ch, SYM.simple_stmt);
                 for (j = 0; j < NCH(ch); j += 2) {
                     if (NCH(CHILD(ch, j)) === 0) {
-                        goog.asserts.assert(j + 1 === NCH(ch));
+                        Sk.asserts.assert(j + 1 === NCH(ch));
                         break;
                     }
                     seq[pos++] = astForStmt(c, CHILD(ch, j));
@@ -317,7 +392,7 @@ function astForSuite (c, n) {
             }
         }
     }
-    goog.asserts.assert(pos === numStmts(n));
+    Sk.asserts.assert(pos === numStmts(n));
     return seq;
 }
 
@@ -327,23 +402,24 @@ function astForExceptClause (c, exc, body) {
     REQ(exc, SYM.except_clause);
     REQ(body, SYM.suite);
     if (NCH(exc) === 1) {
-        return new ExceptHandler(null, null, astForSuite(c, body), exc.lineno, exc.col_offset);
+        return new Sk.astnodes.ExceptHandler(null, null, astForSuite(c, body), exc.lineno, exc.col_offset);
     }
     else if (NCH(exc) === 2) {
-        return new ExceptHandler(astForExpr(c, CHILD(exc, 1)), null, astForSuite(c, body), exc.lineno, exc.col_offset);
+        return new Sk.astnodes.ExceptHandler(ast_for_expr(c, CHILD(exc, 1)), null, astForSuite(c, body), exc.lineno, exc.col_offset);
     }
     else if (NCH(exc) === 4) {
-        e = astForExpr(c, CHILD(exc, 3));
-        setContext(c, e, Store, CHILD(exc, 3));
-        return new ExceptHandler(astForExpr(c, CHILD(exc, 1)), e, astForSuite(c, body), exc.lineno, exc.col_offset);
+        var expression = ast_for_expr(c, CHILD(exc, 1));
+        e = ast_for_expr(c, CHILD(exc, 3));
+        setContext(c, e, Sk.astnodes.Store, CHILD(exc, 3));
+        return new Sk.astnodes.ExceptHandler(ast_for_expr(c, CHILD(exc, 1)), e, astForSuite(c, body), exc.lineno, exc.col_offset);
     }
-    goog.asserts.fail("wrong number of children for except clause");
+    Sk.asserts.fail("wrong number of children for except clause");
 }
 
 function astForTryStmt (c, n) {
     var exceptSt;
     var i;
-    var handlers;
+    var handlers = [];
     var nc = NCH(n);
     var nexcept = (nc - 3) / 3;
     var body, orelse = [],
@@ -376,25 +452,15 @@ function astForTryStmt (c, n) {
     }
 
     if (nexcept > 0) {
-        handlers = [];
-        for (i = 0; i < nexcept; ++i) {
+        /* process except statements to create a try ... except */
+        for (i = 0; i < nexcept; i++) {
             handlers[i] = astForExceptClause(c, CHILD(n, 3 + i * 3), CHILD(n, 5 + i * 3));
         }
-        exceptSt = new TryExcept(body, handlers, orelse, n.lineno, n.col_offset);
-
-        if (!finally_) {
-            return exceptSt;
-        }
-
-        /* if a 'finally' is present too, we nest the TryExcept within a
-         TryFinally to emulate try ... except ... finally */
-        body = [exceptSt];
     }
 
-    goog.asserts.assert(finally_ !== null);
-    return new TryFinally(body, finally_, n.lineno, n.col_offset);
+    Sk.asserts.assert(!!finally_ || handlers.length != 0);
+    return new Sk.astnodes.Try(body, handlers, orelse, finally_, n.lineno, n.col_offset);
 }
-
 
 function astForDottedName (c, n) {
     var i;
@@ -406,10 +472,10 @@ function astForDottedName (c, n) {
     lineno = n.lineno;
     col_offset = n.col_offset;
     id = strobj(CHILD(n, 0).value);
-    e = new Name(id, Load, lineno, col_offset);
+    e = new Sk.astnodes.Name(id, Sk.astnodes.Load, lineno, col_offset);
     for (i = 2; i < NCH(n); i += 2) {
         id = strobj(CHILD(n, i).value);
-        e = new Attribute(e, id, Load, lineno, col_offset);
+        e = new Sk.astnodes.Attribute(e, id, Sk.astnodes.Load, lineno, col_offset);
     }
     return e;
 }
@@ -427,10 +493,10 @@ function astForDecorator (c, n) {
     }
     else if (NCH(n) === 5) // call with no args
     {
-        return new Call(nameExpr, [], [], null, null, n.lineno, n.col_offset);
+        return new Sk.astnodes.Call(nameExpr, [], [], null, null, n.lineno, n.col_offset);
     }
     else {
-        return astForCall(c, CHILD(n, 3), nameExpr);
+        return ast_for_call(c, CHILD(n, 3), nameExpr);
     }
 }
 
@@ -445,83 +511,84 @@ function astForDecorators (c, n) {
     return decoratorSeq;
 }
 
-function astForDecorated (c, n) {
-    var thing;
-    var decoratorSeq;
-    REQ(n, SYM.decorated);
-    decoratorSeq = astForDecorators(c, CHILD(n, 0));
-    goog.asserts.assert(CHILD(n, 1).type === SYM.funcdef || CHILD(n, 1).type === SYM.classdef);
+function ast_for_decorated (c, n) {
+    /* decorated: decorators (classdef | funcdef | async_funcdef) */
+    var thing = null;
+    var decorator_seq = null;
 
-    thing = null;
-    if (CHILD(n, 1).type === SYM.funcdef) {
-        thing = astForFuncdef(c, CHILD(n, 1), decoratorSeq);
+    REQ(n, SYM.decorated);
+
+    decorator_seq = astForDecorators(c, CHILD(n, 0));
+    Sk.asserts.assert(TYPE(CHILD(n, 1)) == SYM.funcdef ||
+            TYPE(CHILD(n, 1)) == SYM.async_funcdef ||
+            TYPE(CHILD(n, 1)) == SYM.classdef);
+
+    if (TYPE(CHILD(n, 1)) == SYM.funcdef) {
+        thing = ast_for_funcdef(c, CHILD(n, 1), decorator_seq);
+    } else if (TYPE(CHILD(n, 1)) == SYM.classdef) {
+        thing = astForClassdef(c, CHILD(n, 1), decorator_seq);
+    } else if (TYPE(CHILD(n, 1)) == SYM.async_funcdef) {
+        thing = ast_for_async_funcdef(c, CHILD(n, 1), decorator_seq);
     }
-    else if (CHILD(n, 1) === SYM.classdef) {
-        thing = astForClassdef(c, CHILD(n, 1), decoratorSeq);
-    }
+    /* we count the decorators in when talking about the class' or
+        * function's line number */
     if (thing) {
-        thing.lineno = n.lineno;
+        thing.lineno = LINENO(n);
         thing.col_offset = n.col_offset;
     }
     return thing;
 }
 
-
 /* with_item: test ['as' expr] */
-function astForWithItem (c, n, content) {
-    var expr_ty, context_expr, optional_vars;
+function ast_for_with_item (c, n) {
+    var context_expr, optional_vars;
     REQ(n, SYM.with_item);
-    context_expr = astForExpr(c, CHILD(n, 0));
+    context_expr = ast_for_expr(c, CHILD(n, 0));
     if (NCH(n) == 3) {
-        optional_vars = astForExpr(c, CHILD(n, 2));
-        setContext(c, optional_vars, Store, n);
+        optional_vars = ast_for_expr(c, CHILD(n, 2));
+        setContext(c, optional_vars, Sk.astnodes.Store, n);
     }
 
-    return new With_(context_expr, optional_vars, content, n.lineno, n.col_offset);
+    return new Sk.astnodes.withitem(context_expr, optional_vars);
 }
 
-function astForWithStmt (c, n) {
-    /* with_stmt: 'with' with_item (',' with_item)* ':' suite */
-    var i;
-    var ret
-    var inner;
+/* with_stmt: 'with' with_item (',' with_item)* ':' suite */
+function ast_for_with_stmt(c, n0, is_async) {
+    const n = is_async ? CHILD(n0, 1) : n0;
+    var i
+    var items = [], body;
 
-    REQ(n, SYM.with_stmt)
+    REQ(n, SYM.with_stmt);
 
-    /* process the with items inside-out */
-    i = NCH(n) -1 
-    /* the suite of the innermost with item is the suite of the with stmt */
-    inner = astForSuite(c, CHILD(n,i));
+    for (i = 1; i < NCH(n) - 2; i += 2) {
+        var item = ast_for_with_item(c, CHILD(n, i));
+        items[(i - 1) / 2] = item;
+    }
 
-    while (true) {
-        i-=2;
-        ret = astForWithItem(c, CHILD(n, i), inner)
-        /* was this the last item? */
-        if (i == 1) {
-            break;
-        }
+    body = astForSuite(c, CHILD(n, NCH(n) - 1));
 
-        inner = [ret];
-    } 
-
-    return ret
+    if (is_async) {
+        return new Sk.astnodes.AsyncWith(items, body, LINENO(n0), n0.col_offset);
+    } else {
+        return new Sk.astnodes.With(items, body, LINENO(n), n.col_offset);
+    }
 }
 
 function astForExecStmt (c, n) {
     var expr1, globals = null, locals = null;
     var nchildren = NCH(n);
-    goog.asserts.assert(nchildren === 2 || nchildren === 4 || nchildren === 6);
+    Sk.asserts.assert(nchildren === 2 || nchildren === 4 || nchildren === 6);
 
     /* exec_stmt: 'exec' expr ['in' test [',' test]] */
     REQ(n, SYM.exec_stmt);
-    expr1 = astForExpr(c, CHILD(n, 1));
+    expr1 = ast_for_expr(c, CHILD(n, 1));
     if (nchildren >= 4) {
-        globals = astForExpr(c, CHILD(n, 3));
+        globals = ast_for_expr(c, CHILD(n, 3));
     }
     if (nchildren === 6) {
-        locals = astForExpr(c, CHILD(n, 5));
+        locals = ast_for_expr(c, CHILD(n, 5));
     }
-    return new Exec(expr1, globals, locals, n.lineno, n.col_offset);
+    return new Sk.astnodes.Exec(expr1, globals, locals, n.lineno, n.col_offset);
 }
 
 function astForIfStmt (c, n) {
@@ -537,8 +604,8 @@ function astForIfStmt (c, n) {
     var s;
     REQ(n, SYM.if_stmt);
     if (NCH(n) === 4) {
-        return new If_(
-            astForExpr(c, CHILD(n, 1)),
+        return new Sk.astnodes.If(
+            ast_for_expr(c, CHILD(n, 1)),
             astForSuite(c, CHILD(n, 3)),
             [], n.lineno, n.col_offset);
     }
@@ -546,8 +613,8 @@ function astForIfStmt (c, n) {
     s = CHILD(n, 4).value;
     decider = s.charAt(2); // elSe or elIf
     if (decider === "s") {
-        return new If_(
-            astForExpr(c, CHILD(n, 1)),
+        return new Sk.astnodes.If(
+            ast_for_expr(c, CHILD(n, 1)),
             astForSuite(c, CHILD(n, 3)),
             astForSuite(c, CHILD(n, 6)),
             n.lineno, n.col_offset);
@@ -568,8 +635,8 @@ function astForIfStmt (c, n) {
 
         if (hasElse) {
             orelse = [
-                new If_(
-                    astForExpr(c, CHILD(n, NCH(n) - 6)),
+                new Sk.astnodes.If(
+                    ast_for_expr(c, CHILD(n, NCH(n) - 6)),
                     astForSuite(c, CHILD(n, NCH(n) - 4)),
                     astForSuite(c, CHILD(n, NCH(n) - 1)),
                     CHILD(n, NCH(n) - 6).lineno,
@@ -580,30 +647,30 @@ function astForIfStmt (c, n) {
         for (i = 0; i < nElif; ++i) {
             off = 5 + (nElif - i - 1) * 4;
             orelse = [
-                new If_(
-                    astForExpr(c, CHILD(n, off)),
+                new Sk.astnodes.If(
+                    ast_for_expr(c, CHILD(n, off)),
                     astForSuite(c, CHILD(n, off + 2)),
                     orelse,
                     CHILD(n, off).lineno,
                     CHILD(n, off).col_offset)];
         }
-        return new If_(
-            astForExpr(c, CHILD(n, 1)),
+        return new Sk.astnodes.If(
+            ast_for_expr(c, CHILD(n, 1)),
             astForSuite(c, CHILD(n, 3)),
             orelse, n.lineno, n.col_offset);
     }
 
-    goog.asserts.fail("unexpected token in 'if' statement");
+    Sk.asserts.fail("unexpected token in 'if' statement");
 }
 
-function astForExprlist (c, n, context) {
+function ast_for_exprlist (c, n, context) {
     var e;
     var i;
     var seq;
     REQ(n, SYM.exprlist);
     seq = [];
     for (i = 0; i < NCH(n); i += 2) {
-        e = astForExpr(c, CHILD(n, i));
+        e = ast_for_expr(c, CHILD(n, i));
         seq[i / 2] = e;
         if (context) {
             setContext(c, e, context, CHILD(n, i));
@@ -615,7 +682,7 @@ function astForExprlist (c, n, context) {
 function astForDelStmt (c, n) {
     /* del_stmt: 'del' exprlist */
     REQ(n, SYM.del_stmt);
-    return new Delete_(astForExprlist(c, CHILD(n, 1), Del), n.lineno, n.col_offset);
+    return new Sk.astnodes.Delete(ast_for_exprlist(c, CHILD(n, 1), Sk.astnodes.Del), n.lineno, n.col_offset);
 }
 
 function astForGlobalStmt (c, n) {
@@ -626,19 +693,19 @@ function astForGlobalStmt (c, n) {
     for (i = 1; i < NCH(n); i += 2) {
         s[(i - 1) / 2] = strobj(CHILD(n, i).value);
     }
-    return new Global(s, n.lineno, n.col_offset);
+    return new Sk.astnodes.Global(s, n.lineno, n.col_offset);
 }
 
 function astForAssertStmt (c, n) {
     /* assert_stmt: 'assert' test [',' test] */
     REQ(n, SYM.assert_stmt);
     if (NCH(n) === 2) {
-        return new Assert(astForExpr(c, CHILD(n, 1)), null, n.lineno, n.col_offset);
+        return new Sk.astnodes.Assert(ast_for_expr(c, CHILD(n, 1)), null, n.lineno, n.col_offset);
     }
     else if (NCH(n) === 4) {
-        return new Assert(astForExpr(c, CHILD(n, 1)), astForExpr(c, CHILD(n, 3)), n.lineno, n.col_offset);
+        return new Sk.astnodes.Assert(ast_for_expr(c, CHILD(n, 1)), ast_for_expr(c, CHILD(n, 3)), n.lineno, n.col_offset);
     }
-    goog.asserts.fail("improper number of parts to assert stmt");
+    Sk.asserts.fail("improper number of parts to assert stmt");
 }
 
 function aliasForImportName (c, n) {
@@ -660,7 +727,7 @@ function aliasForImportName (c, n) {
                 if (NCH(n) === 3) {
                     str = CHILD(n, 2).value;
                 }
-                return new alias(name, str == null ? null : strobj(str));
+                return new Sk.astnodes.alias(name, str == null ? null : strobj(str));
             case SYM.dotted_as_name:
                 if (NCH(n) === 1) {
                     n = CHILD(n, 0);
@@ -668,14 +735,14 @@ function aliasForImportName (c, n) {
                 }
                 else {
                     a = aliasForImportName(c, CHILD(n, 0));
-                    goog.asserts.assert(!a.asname);
+                    Sk.asserts.assert(!a.asname);
                     a.asname = strobj(CHILD(n, 2).value);
                     return a;
                 }
                 break;
             case SYM.dotted_name:
                 if (NCH(n) === 1) {
-                    return new alias(strobj(CHILD(n, 0).value), null);
+                    return new Sk.astnodes.alias(strobj(CHILD(n, 0).value), null);
                 }
                 else {
                     // create a string of the form a.b.c
@@ -683,11 +750,11 @@ function aliasForImportName (c, n) {
                     for (i = 0; i < NCH(n); i += 2) {
                         str += CHILD(n, i).value + ".";
                     }
-                    return new alias(strobj(str.substr(0, str.length - 1)), null);
+                    return new Sk.astnodes.alias(strobj(str.substr(0, str.length - 1)), null);
                 }
                 break;
             case TOK.T_STAR:
-                return new alias(strobj("*"), null);
+                return new Sk.astnodes.alias(strobj("*"), null);
             default:
                 throw new Sk.builtin.SyntaxError("unexpected import name", c.c_filename, n.lineno);
         }
@@ -722,7 +789,7 @@ function astForImportStmt (c, n) {
         for (i = 0; i < NCH(n); i += 2) {
             aliases[i / 2] = aliasForImportName(c, CHILD(n, i));
         }
-        return new Import_(aliases, lineno, col_offset);
+        return new Sk.astnodes.Import(aliases, lineno, col_offset);
     }
     else if (n.type === SYM.import_from) {
         mod = null;
@@ -772,130 +839,29 @@ function astForImportStmt (c, n) {
             }
         }
         modname = mod ? mod.name.v : "";
-        return new ImportFrom(strobj(modname), aliases, ndots, lineno, col_offset);
+        return new Sk.astnodes.ImportFrom(strobj(modname), aliases, ndots, lineno, col_offset);
     }
     throw new Sk.builtin.SyntaxError("unknown import statement", c.c_filename, n.lineno);
 }
 
-function astForTestlistComp(c, n) {
+function ast_for_testlistComp(c, n) {
     /* testlist_comp: test ( comp_for | (',' test)* [','] ) */
     /* argument: test [comp_for] */
-    goog.asserts.assert(n.type === SYM.testlist_comp || n.type === SYM.argument);
+    Sk.asserts.assert(n.type === SYM.testlist_comp || n.type === SYM.argument);
     if (NCH(n) > 1 && CHILD(n, 1).type === SYM.comp_for) {
-        return astForGenExpr(c, n);
+        return ast_for_gen_expr(c, n);
     }
-    return astForTestlist(c, n);
+    return ast_for_testlist(c, n);
+}
+function ast_for_genexp(c, n)
+{
+    Sk.asserts.assert(TYPE(n) == SYM.testlist_comp || TYPE(n) == SYM.argument);
+    return ast_for_itercomp(c, n, COMP_GENEXP);
 }
 
-function astForListcomp (c, n) {
-    /* listmaker: test ( list_for | (',' test)* [','] )
-     list_for: 'for' exprlist 'in' testlist_safe [list_iter]
-     list_iter: list_for | list_if
-     list_if: 'if' test [list_iter]
-     testlist_safe: test [(',' test)+ [',']]
-     */
-
-    function countListFors (c, n) {
-        var nfors = 0;
-        var ch = CHILD(n, 1);
-        count_list_for: while (true) {
-            nfors++;
-            REQ(ch, SYM.list_for);
-            if (NCH(ch) === 5) {
-                ch = CHILD(ch, 4);
-            }
-            else {
-                return nfors;
-            }
-            count_list_iter: while (true) {
-                REQ(ch, SYM.list_iter);
-                ch = CHILD(ch, 0);
-                if (ch.type === SYM.list_for) {
-                    continue count_list_for;
-                }
-                else if (ch.type === SYM.list_if) {
-                    if (NCH(ch) === 3) {
-                        ch = CHILD(ch, 2);
-                        continue count_list_iter;
-                    }
-                    else {
-                        return nfors;
-                    }
-                }
-                break;
-            }
-            break;
-        }
-    }
-
-    function countListIfs (c, n) {
-        var nifs = 0;
-        while (true) {
-            REQ(n, SYM.list_iter);
-            if (CHILD(n, 0).type === SYM.list_for) {
-                return nifs;
-            }
-            n = CHILD(n, 0);
-            REQ(n, SYM.list_if);
-            nifs++;
-            if (NCH(n) == 2) {
-                return nifs;
-            }
-            n = CHILD(n, 2);
-        }
-    }
-
-    var j;
-    var ifs;
-    var nifs;
-    var lc;
-    var expression;
-    var t;
-    var forch;
-    var i;
-    var ch;
-    var listcomps;
-    var nfors;
-    var elt;
-    REQ(n, SYM.listmaker);
-    goog.asserts.assert(NCH(n) > 1);
-    elt = astForExpr(c, CHILD(n, 0));
-    nfors = countListFors(c, n);
-    listcomps = [];
-    ch = CHILD(n, 1);
-    for (i = 0; i < nfors; ++i) {
-        REQ(ch, SYM.list_for);
-        forch = CHILD(ch, 1);
-        t = astForExprlist(c, forch, Store);
-        expression = astForTestlist(c, CHILD(ch, 3));
-        if (NCH(forch) === 1) {
-            lc = new comprehension(t[0], expression, []);
-        }
-        else {
-            lc = new comprehension(new Tuple(t, Store, ch.lineno, ch.col_offset), expression, []);
-        }
-
-        if (NCH(ch) === 5) {
-            ch = CHILD(ch, 4);
-            nifs = countListIfs(c, ch);
-            ifs = [];
-            for (j = 0; j < nifs; ++j) {
-                REQ(ch, SYM.list_iter);
-                ch = CHILD(ch, 0);
-                REQ(ch, SYM.list_if);
-                ifs[j] = astForExpr(c, CHILD(ch, 1));
-                if (NCH(ch) === 3) {
-                    ch = CHILD(ch, 2);
-                }
-            }
-            if (ch.type === SYM.list_iter) {
-                ch = CHILD(ch, 0);
-            }
-            lc.ifs = ifs;
-        }
-        listcomps[i] = lc;
-    }
-    return new ListComp(elt, listcomps, n.lineno, n.col_offset);
+function  ast_for_listcomp(c, n) {
+    Sk.asserts.assert(TYPE(n) == (SYM.testlist_comp));
+    return ast_for_itercomp(c, n, COMP_LISTCOMP);
 }
 
 function astForFactor (c, n) {
@@ -915,24 +881,24 @@ function astForFactor (c, n) {
                     pnum = CHILD(patom, 0);
                     if (pnum.type === TOK.T_NUMBER) {
                         pnum.value = "-" + pnum.value;
-                        return astForAtom(c, patom);
+                        return ast_for_atom(c, patom);
                     }
                 }
             }
         }
     }
 
-    expression = astForExpr(c, CHILD(n, 1));
+    expression = ast_for_expr(c, CHILD(n, 1));
     switch (CHILD(n, 0).type) {
         case TOK.T_PLUS:
-            return new UnaryOp(UAdd, expression, n.lineno, n.col_offset);
+            return new Sk.astnodes.UnaryOp(Sk.astnodes.UAdd, expression, n.lineno, n.col_offset);
         case TOK.T_MINUS:
-            return new UnaryOp(USub, expression, n.lineno, n.col_offset);
+            return new Sk.astnodes.UnaryOp(Sk.astnodes.USub, expression, n.lineno, n.col_offset);
         case TOK.T_TILDE:
-            return new UnaryOp(Invert, expression, n.lineno, n.col_offset);
+            return new Sk.astnodes.UnaryOp(Sk.astnodes.Invert, expression, n.lineno, n.col_offset);
     }
 
-    goog.asserts.fail("unhandled factor");
+    Sk.asserts.fail("unhandled factor");
 }
 
 function astForForStmt (c, n) {
@@ -946,372 +912,645 @@ function astForForStmt (c, n) {
         seq = astForSuite(c, CHILD(n, 8));
     }
     nodeTarget = CHILD(n, 1);
-    _target = astForExprlist(c, nodeTarget, Store);
+    _target = ast_for_exprlist(c, nodeTarget, Sk.astnodes.Store);
     if (NCH(nodeTarget) === 1) {
         target = _target[0];
     }
     else {
-        target = new Tuple(_target, Store, n.lineno, n.col_offset);
+        target = new Sk.astnodes.Tuple(_target, Sk.astnodes.Store, n.lineno, n.col_offset);
     }
 
-    return new For_(target,
-        astForTestlist(c, CHILD(n, 3)),
+    return new Sk.astnodes.For(target,
+        ast_for_testlist(c, CHILD(n, 3)),
         astForSuite(c, CHILD(n, 5)),
         seq, n.lineno, n.col_offset);
 }
 
-function astForCall (c, n, func) {
+function ast_for_call(c, n, func, allowgen)
+{
     /*
-      arglist: (argument ',')* (argument [',']| '*' test [',' '**' test]
-               | '**' test)
-      argument: test [comp_for] | test '=' test       # Really [keyword '='] test
+      arglist: argument (',' argument)*  [',']
+      argument: ( test [comp_for] | '*' test | test '=' test | '**' test )
     */
-    var tmp;
-    var k;
-    var key;
-    var e;
-    var kwarg;
-    var vararg;
-    var keywords;
+
+    var i, nargs, nkeywords;
+    var ndoublestars;
     var args;
-    var ch;
-    var i;
-    var ngens;
-    var nkeywords;
-    var nargs;
+    var keywords;
 
     REQ(n, SYM.arglist);
+
     nargs = 0;
     nkeywords = 0;
-    ngens = 0;
     for (i = 0; i < NCH(n); i++) {
-        ch = CHILD(n, i);
-        if (ch.type === SYM.argument) {
-            if (NCH(ch) === 1) {
+        var ch = CHILD(n, i);
+        if (TYPE(ch) == SYM.argument) {
+            if (NCH(ch) == 1) {
                 nargs++;
-            }
-            else if (CHILD(ch, 1).type === SYM.comp_for) {
-                ngens++;
-            }
-            else {
+            } else if (TYPE(CHILD(ch, 1)) == SYM.comp_for) {
+                nargs++;
+                if (!allowgen) {
+                    ast_error(c, ch, "invalid syntax");
+                }
+                if (NCH(n) > 1) {
+                    ast_error(c, ch, "Generator expression must be parenthesized");
+                }
+            } else if (TYPE(CHILD(ch, 0)) == TOK.T_STAR) {
+                nargs++;
+            } else {
+                /* TYPE(CHILD(ch, 0)) == DOUBLESTAR or keyword argument */
                 nkeywords++;
             }
         }
     }
-    if (ngens > 1 || (ngens && (nargs || nkeywords))) {
-        throw new Sk.builtin.SyntaxError("Generator expression must be parenthesized if not sole argument", c.c_filename, n.lineno);
-    }
-    if (nargs + nkeywords + ngens > 255) {
-        throw new Sk.builtin.SyntaxError("more than 255 arguments", c.c_filename, n.lineno);
-    }
-    args = [];
-    keywords = [];
-    nargs = 0;
-    nkeywords = 0;
-    vararg = null;
-    kwarg = null;
+
+    args = []
+    keywords = []
+
+    nargs = 0;  /* positional arguments + iterable argument unpackings */
+    nkeywords = 0;  /* keyword arguments + keyword argument unpackings */
+    ndoublestars = 0;  /* just keyword argument unpackings */
     for (i = 0; i < NCH(n); i++) {
         ch = CHILD(n, i);
-        if (ch.type === SYM.argument) {
-            if (NCH(ch) === 1) {
+        if (TYPE(ch) == SYM.argument) {
+            var e;
+            var chch = CHILD(ch, 0);
+            if (NCH(ch) == 1) {
+                /* a positional argument */
                 if (nkeywords) {
-                    throw new Sk.builtin.SyntaxError("non-keyword arg after keyword arg", c.c_filename, n.lineno);
-                }
-                if (vararg) {
-                    throw new Sk.builtin.SyntaxError("only named arguments may follow *expression", c.c_filename, n.lineno);
-                }
-                args[nargs++] = astForExpr(c, CHILD(ch, 0));
-            }
-            else if (CHILD(ch, 1).type === SYM.comp_for) {
-                args[nargs++] = astForGenExpr(c, ch);
-            }
-            else {
-                e = astForExpr(c, CHILD(ch, 0));
-                if (e.constructor === Lambda) {
-                    throw new Sk.builtin.SyntaxError("lambda cannot contain assignment", c.c_filename, n.lineno);
-                }
-                else if (e.constructor !== Name) {
-                    throw new Sk.builtin.SyntaxError("keyword can't be an expression", c.c_filename, n.lineno);
-                }
-                key = e.id;
-                forbiddenCheck(c, CHILD(ch, 0), key, n.lineno);
-                for (k = 0; k < nkeywords; ++k) {
-                    tmp = keywords[k].arg;
-                    if (tmp === key) {
-                        throw new Sk.builtin.SyntaxError("keyword argument repeated", c.c_filename, n.lineno);
+                    if (ndoublestars) {
+                        ast_error(c, chch,
+                                "positional argument follows " +
+                                "keyword argument unpacking");
+                    } else {
+                        ast_error(c, chch,
+                                "positional argument follows " +
+                                "keyword argument");
                     }
                 }
-                keywords[nkeywords++] = new keyword(key, astForExpr(c, CHILD(ch, 2)));
+                e = ast_for_expr(c, chch);
+                if (!e) {
+                    return NULL;
+                }
+                args[nargs++] = e;
+            } else if (TYPE(chch) == TOK.T_STAR) {
+                /* an iterable argument unpacking */
+                var starred;
+                if (ndoublestars) {
+                    ast_error(c, chch,
+                            "iterable argument unpacking follows " +
+                            "keyword argument unpacking");
+                    return NULL;
+                }
+                e = ast_for_expr(c, CHILD(ch, 1));
+                if (!e) {
+                    return NULL;
+                }
+                starred = new Sk.astnodes.Starred(e, Sk.astnodes.Load, LINENO(chch),
+                        chch.col_offset);
+                args[nargs++] = starred;
+            } else if (TYPE(chch) == TOK.T_DOUBLESTAR) {
+                /* a keyword argument unpacking */
+                var kw;
+                i++;
+                e = ast_for_expr(c, CHILD(ch, 1));
+                if (!e) {
+                    return NULL;
+                }
+                kw = new Sk.astnodes.keyword(NULL, e);
+                keywords[nkeywords++] = kw;
+                ndoublestars++;
+            } else if (TYPE(CHILD(ch, 1)) == SYM.comp_for) {
+                /* the lone generator expression */
+                e = ast_for_genexp(c, ch);
+                if (!e) {
+                    return NULL;
+                }
+                args[nargs++] = e;
+            } else {
+                /* a keyword argument */
+                var kw;
+                var key, tmp;
+                var k;
+
+                /* chch is test, but must be an identifier? */
+                e = ast_for_expr(c, chch);
+                if (!e) {
+                    return NULL;
+                }
+                /* f(lambda x: x[0] = 3) ends up getting parsed with
+                 * LHS test = lambda x: x[0], and RHS test = 3.
+                 * SF bug 132313 points out that complaining about a keyword
+                 * then is very confusing.
+                 */
+                if (e.constructor === Sk.astnodes.Lambda) {
+                    ast_error(c, chch,
+                            "lambda cannot contain assignment");
+                    return NULL;
+                }
+                else if (e.constructor !== Sk.astnodes.Name) {
+                    ast_error(c, chch,
+                            "keyword can't be an expression");
+                    return NULL;
+                }
+                else if (forbiddenCheck(c, e.id, ch, 1)) {
+                    return NULL;
+                }
+                key = e.id;
+                for (k = 0; k < nkeywords; k++) {
+                    tmp = keywords[k].arg;
+                    if (tmp && tmp === key) {
+                        ast_error(c, chch,
+                                "keyword argument repeated");
+                        return NULL;
+                    }
+                }
+                e = ast_for_expr(c, CHILD(ch, 2));
+                if (!e)
+                    return NULL;
+                kw = new Sk.astnodes.keyword(key, e);
+                keywords[nkeywords++] = kw;
             }
         }
-        else if (ch.type === TOK.T_STAR) {
-            vararg = astForExpr(c, CHILD(n, ++i));
-        }
-        else if (ch.type === TOK.T_DOUBLESTAR) {
-            kwarg = astForExpr(c, CHILD(n, ++i));
-        }
     }
-    return new Call(func, args, keywords, vararg, kwarg, func.lineno, func.col_offset);
+
+    return new Sk.astnodes.Call(func, args, keywords, func.lineno, func.col_offset);
 }
 
-function astForTrailer (c, n, leftExpr) {
-    /* trailer: '(' [arglist] ')' | '[' subscriptlist ']' | '.' NAME 
-     subscriptlist: subscript (',' subscript)* [',']
-     subscript: '.' '.' '.' | test | [test] ':' [test] [sliceop]
+function ast_for_trailer(c, n, left_expr) {
+    /* trailer: '(' [arglist] ')' | '[' subscriptlist ']' | '.' NAME
+       subscriptlist: subscript (',' subscript)* [',']
+       subscript: '.' '.' '.' | test | [test] ':' [test] [sliceop]
      */
-    var e;
-    var elts;
-    var slc;
-    var j;
-    var slices;
-    var simple;
     REQ(n, SYM.trailer);
-    if (CHILD(n, 0).type === TOK.T_LPAR) {
-        if (NCH(n) === 2) {
-            return new Call(leftExpr, [], [], null, null, n.lineno, n.col_offset);
-        }
-        else {
-            return astForCall(c, CHILD(n, 1), leftExpr);
-        }
+    if (TYPE(CHILD(n, 0)) == TOK.T_LPAR) {
+        if (NCH(n) == 2)
+            return new Sk.astnodes.Call(left_expr, NULL, NULL, LINENO(n),
+                        n.col_offset);
+        else
+            return ast_for_call(c, CHILD(n, 1), left_expr, true);
     }
-    else if (CHILD(n, 0).type === TOK.T_DOT) {
-        return new Attribute(leftExpr, strobj(CHILD(n, 1).value), Load, n.lineno, n.col_offset);
+    else if (TYPE(CHILD(n, 0)) == TOK.T_DOT) {
+        var attr_id = new_identifier(CHILD(n, 1));
+        if (!attr_id)
+            return NULL;
+        return new Sk.astnodes.Attribute(left_expr, attr_id, Sk.astnodes.Load,
+                         LINENO(n), n.col_offset);
     }
     else {
         REQ(CHILD(n, 0), TOK.T_LSQB);
         REQ(CHILD(n, 2), TOK.T_RSQB);
         n = CHILD(n, 1);
-        if (NCH(n) === 1) {
-            return new Subscript(leftExpr, astForSlice(c, CHILD(n, 0)), Load, n.lineno, n.col_offset);
+        if (NCH(n) == 1) {
+            var slc = astForSlice(c, CHILD(n, 0));
+            if (!slc) {
+                return NULL;
+            }
+            return new Sk.astnodes.Subscript(left_expr, slc, Sk.astnodes.Load, LINENO(n), n.col_offset);
         }
         else {
-            /* The grammar is ambiguous here. The ambiguity is resolved 
-             by treating the sequence as a tuple literal if there are
-             no slice features.
-             */
-            simple = true;
-            slices = [];
+            /* The grammar is ambiguous here. The ambiguity is resolved
+               by treating the sequence as a tuple literal if there are
+               no slice features.
+            */
+            var j;
+            var slc;
+            var e;
+            var simple = 1;
+            var slices = [], elts;
+
             for (j = 0; j < NCH(n); j += 2) {
                 slc = astForSlice(c, CHILD(n, j));
-                if (slc.constructor !== Index) {
-                    simple = false;
+                if (!slc) {
+                    return NULL;
+                }
+                if (slc.kind != _slice_kind.Index_kind) {
+                    simple = 0;
                 }
                 slices[j / 2] = slc;
             }
             if (!simple) {
-                return new Subscript(leftExpr, new ExtSlice(slices), Load, n.lineno, n.col_offset);
+                return new Sk.astnodes.Subscript(left_expr, new Sk.astnodes.ExtSlice(slices),
+                                Sk.astnodes.Load, LINENO(n), n.col_offset);
             }
+            /* extract Index values and put them in a Tuple */
             elts = [];
             for (j = 0; j < slices.length; ++j) {
+                // @meredydd any idea how we reach this?
                 slc = slices[j];
-                goog.asserts.assert(slc.constructor === Index && slc.value !== null && slc.value !== undefined);
-                elts[j] = slc.value;
+                Sk.asserts.assert(slc.kind == _slice_kind.Index_kind  && slc.v.Index.value);
+                elts[j] = slc.v.Index.value;
             }
-            e = new Tuple(elts, Load, n.lineno, n.col_offset);
-            return new Subscript(leftExpr, new Index(e), Load, n.lineno, n.col_offset);
+            e = new Sk.astnodes.Tuple(elts, Sk.astnodes.Load, LINENO(n), n.col_offset);
+
+            return new Sk.astnodes.Subscript(left_expr, new Sk.astnodes.Index(e),
+                             Sk.astnodes.Load, LINENO(n), n.col_offset);
         }
     }
 }
 
-function astForFlowStmt (c, n) {
+function ast_for_flow_stmt(c, n)
+{
     /*
-     flow_stmt: break_stmt | continue_stmt | return_stmt | raise_stmt
-     | yield_stmt
-     break_stmt: 'break'
-     continue_stmt: 'continue'
-     return_stmt: 'return' [testlist]
-     yield_stmt: yield_expr
-     yield_expr: 'yield' testlist
-     raise_stmt: 'raise' [test [',' test [',' test]]]
-     */
+      flow_stmt: break_stmt | continue_stmt | return_stmt | raise_stmt
+                 | yield_stmt
+      break_stmt: 'break'
+      continue_stmt: 'continue'
+      return_stmt: 'return' [testlist]
+      yield_stmt: yield_expr
+      yield_expr: 'yield' testlist | 'yield' 'from' test
+      raise_stmt: 'raise' [test [',' test [',' test]]]
+    */
     var ch;
+
     REQ(n, SYM.flow_stmt);
     ch = CHILD(n, 0);
-    switch (ch.type) {
+    switch (TYPE(ch)) {
         case SYM.break_stmt:
-            return new Break_(n.lineno, n.col_offset);
+            return new Sk.astnodes.Break(LINENO(n), n.col_offset,
+                         n.end_lineno, n.end_col_offset);
         case SYM.continue_stmt:
-            return new Continue_(n.lineno, n.col_offset);
-        case SYM.yield_stmt:
-            return new Expr(astForExpr(c, CHILD(ch, 0)), n.lineno, n.col_offset);
+            return new Sk.astnodes.Continue(LINENO(n), n.col_offset,
+                            n.end_lineno, n.end_col_offset);
+        case SYM.yield_stmt: { /* will reduce to yield_expr */
+            var exp = ast_for_expr(c, CHILD(ch, 0));
+            if (!exp) {
+                return null;
+            }
+            return new Sk.astnodes.Expr(exp, LINENO(n), n.col_offset,
+                        n.end_lineno, n.end_col_offset);
+        }
         case SYM.return_stmt:
-            if (NCH(ch) === 1) {
-                return new Return_(null, n.lineno, n.col_offset);
-            }
+            if (NCH(ch) == 1)
+                return new Sk.astnodes.Return(null, LINENO(n), n.col_offset,
+                              n.end_lineno, n.end_col_offset);
             else {
-                return new Return_(astForTestlist(c, CHILD(ch, 1)), n.lineno, n.col_offset);
+                var expression = ast_for_testlist(c, CHILD(ch, 1));
+                if (!expression) {
+                    return null;
+                }
+                return new Sk.astnodes.Return(expression, LINENO(n), n.col_offset,
+                              n.end_lineno, n.end_col_offset);
             }
-            break;
         case SYM.raise_stmt:
-            if (NCH(ch) === 1) {
-                return new Raise(null, null, null, n.lineno, n.col_offset);
+            // This is tricky and Skulpt-specific, because we need to handle
+            // both Python 3-style and Python 2-style 'raise' statements
+            if (NCH(ch) == 1)
+                return new Sk.astnodes.Raise(null, null, null, null, LINENO(n), n.col_offset,
+                             n.end_lineno, n.end_col_offset);
+            else if (NCH(ch) >= 2) {
+                var cause = null;
+                var expression = ast_for_expr(c, CHILD(ch, 1));
+                var inst = null, tback = null;
+
+                // raise [expression] from [cause]
+                if (NCH(ch) == 4 && CHILD(ch, 2).value == 'from') {
+                    if (!Sk.__future__.python3) {
+                        ast_error(c, CHILD(ch, 2), "raise ... from ... is not available in Python 2");
+                    }
+                    cause = ast_for_expr(c, CHILD(ch, 3));
+                } else if (NCH(ch) >= 4 && CHILD(ch, 2).value == ',') {
+                    if (Sk.__future__.python3) {
+                        ast_error(c, n, "Old raise syntax is not available in Python 3")
+                    }
+                    // raise [exception_type], [instantiation value] [, [traceback]]
+                    // NB traceback isn't implemented in Skulpt yet
+                    inst = ast_for_expr(c, CHILD(ch, 3));
+
+                    if (NCH(ch) == 6) {
+                        tback = ast_for_expr(c, CHILD(ch, 5));
+                    }
+                }
+                return new Sk.astnodes.Raise(expression, cause, inst, tback, LINENO(n), n.col_offset,
+                             n.end_lineno, n.end_col_offset);
             }
-            else if (NCH(ch) === 2) {
-                return new Raise(astForExpr(c, CHILD(ch, 1)), null, null, n.lineno, n.col_offset);
-            }
-            else if (NCH(ch) === 4) {
-                return new Raise(
-                    astForExpr(c, CHILD(ch, 1)),
-                    astForExpr(c, CHILD(ch, 3)),
-                    null, n.lineno, n.col_offset);
-            }
-            else if (NCH(ch) === 6) {
-                return new Raise(
-                    astForExpr(c, CHILD(ch, 1)),
-                    astForExpr(c, CHILD(ch, 3)),
-                    astForExpr(c, CHILD(ch, 5)),
-                    n.lineno, n.col_offset);
-            }
-            break;
+            /* fall through */
         default:
-            goog.asserts.fail("unexpected flow_stmt");
+            Sk.asserts.fail("unexpected flow_stmt: ", TYPE(ch));
+            return null;
     }
-    goog.asserts.fail("unhandled flow statement");
+}
+
+function astForArg(c, n)
+{
+    var name;
+    var annotation = null;
+    var ch;
+
+    Sk.asserts.assert(n.type === SYM.tfpdef || n.type === SYM.vfpdef);
+    ch = CHILD(n, 0);
+    forbiddenCheck(c, ch, ch.value, ch.lineno);
+    name = strobj(ch.value);
+
+    if (NCH(n) == 3 && CHILD(n, 1).type === TOK.T_COLON) {
+        annotation = ast_for_expr(c, CHILD(n, 2));
+    }
+
+    return new Sk.astnodes.arg(name, annotation, n.lineno, n.col_offset);
+}
+
+/* returns -1 if failed to handle keyword only arguments
+   returns new position to keep processing if successful
+               (',' tfpdef ['=' test])*
+                     ^^^
+   start pointing here
+ */
+function handleKeywordonlyArgs(c, n, start, kwonlyargs, kwdefaults)
+{
+    var argname;
+    var ch;
+    var expression;
+    var annotation;
+    var arg;
+    var i = start;
+    var j = 0; /* index for kwdefaults and kwonlyargs */
+
+    if (!kwonlyargs) {
+        ast_error(c, CHILD(n, start), "named arguments must follow bare *");
+    }
+    Sk.asserts.assert(kwdefaults);
+    while (i < NCH(n)) {
+        ch = CHILD(n, i);
+        switch (ch.type) {
+            case SYM.vfpdef:
+            case SYM.tfpdef:
+                if (i + 1 < NCH(n) && CHILD(n, i + 1).type == TOK.T_EQUAL) {
+                    kwdefaults[j] = ast_for_expr(c, CHILD(n, i + 2));
+                    i += 2; /* '=' and test */
+                }
+                else { /* setting NULL if no default value exists */
+                    kwdefaults[j] = null;
+                }
+                if (NCH(ch) == 3) {
+                    /* ch is NAME ':' test */
+                    annotation = ast_for_expr(c, CHILD(ch, 2));
+                }
+                else {
+                    annotation = null;
+                }
+                ch = CHILD(ch, 0);
+                forbiddenCheck(c, ch, ch.value, ch.lineno);
+                argname = strobj(ch.value);
+                kwonlyargs[j++] = new Sk.astnodes.arg(argname, annotation, ch.lineno, ch.col_offset);
+                i += 2; /* the name and the comma */
+                break;
+            case TOK.T_DOUBLESTAR:
+                return i;
+            default:
+                ast_error(c, ch, "unexpected node");
+        }
+    }
+    return i;
 }
 
 function astForArguments (c, n) {
-    /* parameters: '(' [varargslist] ')'
-     varargslist: (fpdef ['=' test] ',')* ('*' NAME [',' '**' NAME]
-     | '**' NAME) | fpdef ['=' test] (',' fpdef ['=' test])* [',']
-     */
-    var parenthesized;
-    var id;
-    var complexArgs;
     var k;
     var j;
     var i;
     var foundDefault;
-    var defaults;
-    var args;
-    var ch;
+    var posargs = [];
+    var posdefaults = [];
+    var kwonlyargs = [];
+    var kwdefaults = [];
     var vararg = null;
     var kwarg = null;
+    var ch = null;
+
+    /* This function handles both typedargslist (function definition)
+       and varargslist (lambda definition).
+
+       parameters: '(' [typedargslist] ')'
+       typedargslist: (tfpdef ['=' test] (',' tfpdef ['=' test])* [',' [
+               '*' [tfpdef] (',' tfpdef ['=' test])* [',' ['**' tfpdef [',']]]
+             | '**' tfpdef [',']]]
+         | '*' [tfpdef] (',' tfpdef ['=' test])* [',' ['**' tfpdef [',']]]
+         | '**' tfpdef [','])
+       tfpdef: NAME [':' test]
+       varargslist: (vfpdef ['=' test] (',' vfpdef ['=' test])* [',' [
+               '*' [vfpdef] (',' vfpdef ['=' test])* [',' ['**' vfpdef [',']]]
+             | '**' vfpdef [',']]]
+         | '*' [vfpdef] (',' vfpdef ['=' test])* [',' ['**' vfpdef [',']]]
+         | '**' vfpdef [',']
+       )
+       vfpdef: NAME
+
+    */
     if (n.type === SYM.parameters) {
         if (NCH(n) === 2) // () as arglist
         {
-            return new arguments_([], null, null, []);
+            return new Sk.astnodes.arguments_([], null, [], [], null, []);
         }
         n = CHILD(n, 1);
     }
-    REQ(n, SYM.varargslist);
+    Sk.asserts.assert(n.type === SYM.varargslist ||
+                        n.type === SYM.typedargslist);
 
-    args = [];
-    defaults = [];
 
-    /* fpdef: NAME | '(' fplist ')'
-     fplist: fpdef (',' fpdef)* [',']
-     */
-    foundDefault = false;
+    // Skulpt note: the "counting numbers of args" section
+    // from ast.c is omitted because JS arrays autoexpand
+
+    /* tfpdef: NAME [':' test]
+       vfpdef: NAME
+    */
     i = 0;
-    j = 0; // index for defaults
-    k = 0; // index for args
+    j = 0;  /* index for defaults */
+    k = 0;  /* index for args */
     while (i < NCH(n)) {
         ch = CHILD(n, i);
         switch (ch.type) {
-            case SYM.fpdef:
-                complexArgs = 0;
-                parenthesized = 0;
-                handle_fpdef: while (true) {
-                    if (i + 1 < NCH(n) && CHILD(n, i + 1).type === TOK.T_EQUAL) {
-                        defaults[j++] = astForExpr(c, CHILD(n, i + 2));
-                        i += 2;
-                        foundDefault = true;
-                    }
-                    else if (foundDefault) {
-                        /* def f((x)=4): pass should raise an error.
-                         def f((x, (y))): pass will just incur the tuple unpacking warning. */
-                        if (parenthesized && !complexArgs) {
-                            throw new Sk.builtin.SyntaxError("parenthesized arg with default", c.c_filename, n.lineno);
-                        }
-                        throw new Sk.builtin.SyntaxError("non-default argument follows default argument", c.c_filename, n.lineno);
-                    }
-
-                    if (NCH(ch) === 3) {
-                        ch = CHILD(ch, 1);
-                        // def foo((x)): is not complex, special case.
-                        if (NCH(ch) !== 1) {
-                            throw new Sk.builtin.SyntaxError("tuple parameter unpacking has been removed", c.c_filename, n.lineno);
-                        }
-                        else {
-                            /* def foo((x)): setup for checking NAME below. */
-                            /* Loop because there can be many parens and tuple
-                             unpacking mixed in. */
-                            parenthesized = true;
-                            ch = CHILD(ch, 0);
-                            goog.asserts.assert(ch.type === SYM.fpdef);
-                            continue handle_fpdef;
-                        }
-                    }
-                    if (CHILD(ch, 0).type === TOK.T_NAME) {
-                        forbiddenCheck(c, n, CHILD(ch, 0).value, n.lineno);
-                        id = strobj(CHILD(ch, 0).value);
-                        args[k++] = new Name(id, Param, ch.lineno, ch.col_offset);
-                    }
+            case SYM.tfpdef:
+            case SYM.vfpdef:
+                /* XXX Need to worry about checking if TYPE(CHILD(n, i+1)) is
+                   anything other than EQUAL or a comma? */
+                /* XXX Should NCH(n) check be made a separate check? */
+                if (i + 1 < NCH(n) && CHILD(n, i + 1).type == TOK.T_EQUAL) {
+                    posdefaults[j++] = ast_for_expr(c, CHILD(n, i + 2));
                     i += 2;
-                    if (parenthesized) {
-                        throw new Sk.builtin.SyntaxError("parenthesized argument names are invalid", c.c_filename, n.lineno);
-                    }
-                    break;
+                    foundDefault = 1;
                 }
+                else if (foundDefault) {
+                    throw new Sk.builtin.SyntaxError("non-default argument follows default argument", c.c_filename, n.lineno);
+                }
+                posargs[k++] = astForArg(c, ch);
+                i += 2; /* the name and the comma */
                 break;
             case TOK.T_STAR:
-                forbiddenCheck(c, CHILD(n, i + 1), CHILD(n, i + 1).value, n.lineno);
-                vararg = strobj(CHILD(n, i + 1).value);
-                i += 3;
+                if (i+1 >= NCH(n) ||
+                    (i+2 == NCH(n) && CHILD(n, i+1).type == TOK.T_COMMA)) {
+                    throw new Sk.builtin.SyntaxError("named arguments must follow bare *", c.c_filename, n.lineno);
+                }
+                ch = CHILD(n, i+1);  /* tfpdef or COMMA */
+                if (ch.type == TOK.T_COMMA) {
+                    i += 2; /* now follows keyword only arguments */
+                    i = handleKeywordonlyArgs(c, n, i,
+                                                  kwonlyargs, kwdefaults);
+                }
+                else {
+                    vararg = astForArg(c, ch);
+
+                    i += 3;
+                    if (i < NCH(n) && (CHILD(n, i).type == SYM.tfpdef
+                                    || CHILD(n, i).type == SYM.vfpdef)) {
+                        i = handleKeywordonlyArgs(c, n, i,
+                                                      kwonlyargs, kwdefaults);
+                    }
+                }
                 break;
             case TOK.T_DOUBLESTAR:
-                forbiddenCheck(c, CHILD(n, i + 1), CHILD(n, i + 1).value, n.lineno);
-                kwarg = strobj(CHILD(n, i + 1).value);
+                ch = CHILD(n, i+1);  /* tfpdef */
+                Sk.asserts.assert(ch.type == SYM.tfpdef || ch.type == SYM.vfpdef);
+                kwarg = astForArg(c, ch);
                 i += 3;
                 break;
             default:
-                goog.asserts.fail("unexpected node in varargslist");
+                Sk.asserts.fail("unexpected node in varargslist");
+                return;
         }
     }
-    return new arguments_(args, vararg, kwarg, defaults);
+    return new Sk.astnodes.arguments_(posargs, vararg, kwonlyargs, kwdefaults, kwarg, posdefaults);
 }
 
-function astForFuncdef (c, n, decoratorSeq) {
-    /* funcdef: 'def' NAME parameters ':' suite */
-    var body;
-    var args;
+function ast_for_async_funcdef(c, n, decorator_seq)
+{
+    /* async_funcdef: 'async' funcdef */
+    REQ(n, SYM.async_funcdef);
+    REQ(CHILD(n, 0), TOK.T_NAME);
+    Sk.asserts.assert(STR(CHILD(n, 0) === "async"));
+    REQ(CHILD(n, 1), SYM.funcdef);
+
+    return ast_for_funcdef_impl(c, n, decorator_seq,
+                                true /* is_async */);
+}
+
+function ast_for_funcdef(c, n, decorator_seq) {
+    /* funcdef: 'def' NAME parameters ['->' test] ':' suite */
+    return ast_for_funcdef_impl(c, n, decorator_seq,
+        false /* is_async */);
+}
+
+function ast_for_funcdef_impl(c, n0, decorator_seq, is_async) {
+    /* funcdef: 'def' NAME parameters ['->' test] ':' [TYPE_COMMENT] suite */
+    var n = is_async ? CHILD(n0, 1) : n0;
     var name;
+    var args;
+    var body;
+    var returns = NULL;
+    var name_i = 1;
+    var end_lineno, end_col_offset;
+    var tc;
+    var type_comment = NULL;
+
+    if (is_async && c.c_feature_version < 5) {
+        ast_error(c, n,
+                  "Async functions are only supported in Python 3.5 and greater");
+        return NULL;
+    }
+
     REQ(n, SYM.funcdef);
-    name = strobj(CHILD(n, 1).value);
-    forbiddenCheck(c, CHILD(n, 1), CHILD(n, 1).value, n.lineno);
-    args = astForArguments(c, CHILD(n, 2));
-    body = astForSuite(c, CHILD(n, 4));
-    return new FunctionDef(name, args, body, decoratorSeq, n.lineno, n.col_offset);
+
+    name = new_identifier(CHILD(n, name_i));
+
+    if (forbiddenCheck(c, name, CHILD(n, name_i), 0)) {
+        return NULL;
+    }
+    args = astForArguments(c, CHILD(n, name_i + 1));
+    if (!args) {
+        return NULL;
+    }
+    if (TYPE(CHILD(n, name_i+2)) == TOK.T_RARROW) {
+        returns = ast_for_expr(c, CHILD(n, name_i + 3));
+        if (!returns) {
+            return NULL
+        }
+        name_i += 2;
+    }
+
+    if (TYPE(CHILD(n, name_i + 3)) == TOK.T_TYPE_COMMENT) {
+        type_comment = TOK.T_NEW_TYPE_COMMENT(CHILD(n, name_i + 3));
+        if (!type_comment)
+            return NULL;
+        name_i += 1;
+    }
+
+    body = astForSuite(c, CHILD(n, name_i + 3));
+    if (!body) {
+        return NULL;
+    }
+    // get_last_end_pos(body, &end_lineno, &end_col_offset);
+
+    if (NCH(CHILD(n, name_i + 3)) > 1) {
+        /* Check if the suite has a type comment in it. */
+        tc = CHILD(CHILD(n, name_i + 3), 1);
+
+        if (TYPE(tc) == TOK.T_TYPE_COMMENT) {
+            if (type_comment != NULL) {
+                ast_error(c, n, "Cannot have two type comments on def");
+                return NULL;
+            }
+            type_comment = TOK.T_NEW_TYPE_COMMENT(tc);
+            if (!type_comment)
+                return NULL;
+        }
+    }
+
+    if (is_async)
+        return new Sk.astnodes.AsyncFunctionDef(name, args, body, decorator_seq, returns, type_comment,
+                                LINENO(n0), n0.col_offset, end_lineno, end_col_offset);
+    else
+        return new Sk.astnodes.FunctionDef(name, args, body, decorator_seq, returns, type_comment,
+                           LINENO(n), n.col_offset, end_lineno, end_col_offset);
 }
 
 function astForClassBases (c, n) {
     /* testlist: test (',' test)* [','] */
-    goog.asserts.assert(NCH(n) > 0);
+    Sk.asserts.assert(NCH(n) > 0);
     REQ(n, SYM.testlist);
     if (NCH(n) === 1) {
-        return [ astForExpr(c, CHILD(n, 0)) ];
+        return [ ast_for_expr(c, CHILD(n, 0)) ];
     }
-    return seqForTestlist(c, n);
+    return seq_for_testlist(c, n);
 }
 
 function astForClassdef (c, n, decoratorSeq) {
-    /* classdef: 'class' NAME ['(' testlist ')'] ':' suite */
-    var s;
-    var bases;
+    /* classdef: 'class' NAME ['(' arglist ')'] ':' suite */
     var classname;
+    var call;
+    var s;
+
     REQ(n, SYM.classdef);
-    forbiddenCheck(c, n, CHILD(n, 1).value, n.lineno);
-    classname = strobj(CHILD(n, 1).value);
-    if (NCH(n) === 4) {
-        return new ClassDef(classname, [], astForSuite(c, CHILD(n, 3)), decoratorSeq, n.lineno, n.col_offset);
-    }
-    if (CHILD(n, 3).type === TOK.T_RPAR) {
-        return new ClassDef(classname, [], astForSuite(c, CHILD(n, 5)), decoratorSeq, n.lineno, n.col_offset);
+
+    if (NCH(n) == 4) { /* class NAME ':' suite */
+        s = astForSuite(c, CHILD(n, 3));
+        classname = new_identifier(CHILD(n, 1).value);
+        forbiddenCheck(c, CHILD(n,3), classname, n.lineno);
+
+        return new Sk.astnodes.ClassDef(classname, [], [], s, decoratorSeq,
+                                    /*TODO docstring*/null, LINENO(n), n.col_offset);
     }
 
-    bases = astForClassBases(c, CHILD(n, 3));
+    if (TYPE(CHILD(n, 3)) === TOK.T_RPAR) { /* class NAME '(' ')' ':' suite */
+        s = astForSuite(c, CHILD(n, 5));
+        classname = new_identifier(CHILD(n, 1).value);
+        forbiddenCheck(c, CHILD(n, 3), classname, CHILD(n, 3).lineno);
+        return new Sk.astnodes.ClassDef(classname, [], [], s, decoratorSeq,
+                                    /*TODO docstring*/null, LINENO(n), n.col_offset);
+    }
+
+    /* class NAME '(' arglist ')' ':' suite */
+    /* build up a fake Call node so we can extract its pieces */
+    {
+        var dummy_name;
+        var dummy;
+        dummy_name = new_identifier(CHILD(n, 1));
+        dummy = new Sk.astnodes.Name(dummy_name, Sk.astnodes.Load, LINENO(n), n.col_offset);
+        call = ast_for_call(c, CHILD(n, 3), dummy, false);
+    }
     s = astForSuite(c, CHILD(n, 6));
-    return new ClassDef(classname, bases, s, decoratorSeq, n.lineno, n.col_offset);
+    classname = new_identifier(CHILD(n, 1).value);
+    forbiddenCheck(c, CHILD(n,1), classname, CHILD(n,1).lineno);
+
+    return new Sk.astnodes.ClassDef(classname, call.args, call.keywords, s,
+                               decoratorSeq, /*TODO docstring*/null, LINENO(n), n.col_offset);
 }
 
 function astForLambdef (c, n) {
@@ -1319,20 +1558,20 @@ function astForLambdef (c, n) {
     var args;
     var expression;
     if (NCH(n) === 3) {
-        args = new arguments_([], null, null, []);
-        expression = astForExpr(c, CHILD(n, 2));
+        args = new Sk.astnodes.arguments_([], null, null, []);
+        expression = ast_for_expr(c, CHILD(n, 2));
     }
     else {
         args = astForArguments(c, CHILD(n, 1));
-        expression = astForExpr(c, CHILD(n, 3));
+        expression = ast_for_expr(c, CHILD(n, 3));
     }
-    return new Lambda(args, expression, n.lineno, n.col_offset);
+    return new Sk.astnodes.Lambda(args, expression, n.lineno, n.col_offset);
 }
 
 function astForComprehension(c, n) {
     /* testlist_comp: test ( comp_for | (',' test)* [','] )
        argument: test [comp_for] | test '=' test       # Really [keyword '='] test */
-    
+
     var j;
     var ifs;
     var nifs;
@@ -1375,7 +1614,7 @@ function astForComprehension(c, n) {
             }
             break;
         }
-        goog.asserts.fail("logic error in countCompFors");
+        Sk.asserts.fail("logic error in countCompFors");
     }
 
     function countCompIfs(c, n) {
@@ -1388,7 +1627,7 @@ function astForComprehension(c, n) {
             n = CHILD(n, 0);
             REQ(n, SYM.comp_if);
             nifs++;
-            if (NCH(n) == 2) {
+            if (NCH(n) === 2) {
                 return nifs;
             }
             n = CHILD(n, 2);
@@ -1400,12 +1639,12 @@ function astForComprehension(c, n) {
     for (i = 0; i < nfors; ++i) {
         REQ(n, SYM.comp_for);
         forch = CHILD(n, 1);
-        t = astForExprlist(c, forch, Store);
-        expression = astForExpr(c, CHILD(n, 3));
+        t = ast_for_exprlist(c, forch, Sk.astnodes.Store);
+        expression = ast_for_expr(c, CHILD(n, 3));
         if (NCH(forch) === 1) {
-            comp = new comprehension(t[0], expression, []);
+            comp = new Sk.astnodes.comprehension(t[0], expression, []);
         } else {
-            comp = new comprehension(new Tuple(t, Store, n.lineno, n.col_offset), expression, []);
+            comp = new Sk.astnodes.comprehension(new Sk.astnodes.Tuple(t, Sk.astnodes.Store, n.lineno, n.col_offset), expression, []);
         }
         if (NCH(n) === 5) {
             n = CHILD(n, 4);
@@ -1415,7 +1654,7 @@ function astForComprehension(c, n) {
                 REQ(n, SYM.comp_iter);
                 n = CHILD(n, 0);
                 REQ(n, SYM.comp_if);
-                expression = astForExpr(c, CHILD(n, 1));
+                expression = ast_for_expr(c, CHILD(n, 1));
                 ifs[j] = expression;
                 if (NCH(n) === 3) {
                     n = CHILD(n, 2);
@@ -1433,34 +1672,321 @@ function astForComprehension(c, n) {
 
 function astForIterComp(c, n, type) {
     var elt, comps;
-    goog.asserts.assert(NCH(n) > 1);
-    elt = astForExpr(c, CHILD(n, 0));
+    Sk.asserts.assert(NCH(n) > 1);
+    elt = ast_for_expr(c, CHILD(n, 0));
     comps = astForComprehension(c, CHILD(n, 1));
     if (type === COMP_GENEXP) {
-        return new GeneratorExp(elt, comps, n.lineno, n.col_offset);
+        return new Sk.astnodes.GeneratorExp(elt, comps, n.lineno, n.col_offset);
     } else if (type === COMP_SETCOMP) {
-        return new SetComp(elt, comps, n.lineno, n.col_offset);
+        return new Sk.astnodes.SetComp(elt, comps, n.lineno, n.col_offset);
     }
 }
 
-function astForDictComp(c, n) {
-    var key, value;
-    var comps = [];
-    goog.asserts.assert(NCH(n) > 3);
-    REQ(CHILD(n, 1), TOK.T_COLON);
-    key = astForExpr(c, CHILD(n, 0));
-    value = astForExpr(c, CHILD(n, 2));
-    comps = astForComprehension(c, CHILD(n, 3));
-    return new DictComp(key, value, comps, n.lineno, n.col_offset);
+/*
+   Count the number of 'for' loops in a comprehension.
+   Helper for ast_for_comprehension().
+*/
+function count_comp_fors(c, n) {
+    var n_fors = 0;
+    var is_async;
+    count_comp_for: while (true) {
+        // @meredydd needs new grammar
+        // REQ(n, SYM.comp_for);
+        // if (NCH(n) === 2) {
+        //     REQ(CHILD(n, 0), TOK.T_ASYNC);
+        //     n = CHILD(n, 1);
+        // } else if (NCH(n) === 1) {
+        //     n = CHILD(n, 0);
+        // } else {
+        //     Sk.asserts.fail("logic error in count_comp_fors");
+        // }
+        // if (NCH(n) == (5)) {
+        //     n = CHILD(n, 4);
+        // } else {
+        //     return n_fors;
+        // }
+        is_async = 0;
+        n_fors++;
+        REQ(n, SYM.comp_for);
+        if (TYPE(CHILD(n, 0)) == TOK.T_ASYNC) {
+            is_async = 1;
+        }
+        if (NCH(n) == (5 + is_async)) {
+            n = CHILD(n, 4 + is_async);
+        }
+        else {
+            return n_fors;
+        }
+        count_comp_iter: while (true) {
+            REQ(n, SYM.comp_iter);
+            n = CHILD(n, 0);
+            if (TYPE(n) === SYM.comp_for) {
+                continue count_comp_for;
+            } else if (TYPE(n) === SYM.comp_if) {
+                if (NCH(n) === 3) {
+                    n = CHILD(n, 2);
+                    continue count_comp_iter;
+                } else {
+                    return n_fors;
+                }
+            }
+            break;
+        }
+        break;
+    }
 }
 
-function astForGenExpr(c, n) {
-    goog.asserts.assert(n.type === SYM.testlist_comp || n.type === SYM.argument);
+function count_comp_ifs(c, n)
+{
+    var n_ifs = 0;
+
+    while (true) {
+        REQ(n, SYM.comp_iter);
+        if (TYPE(CHILD(n, 0)) == SYM.comp_for)
+            return n_ifs;
+        n = CHILD(n, 0);
+        REQ(n, SYM.comp_if);
+        n_ifs++;
+        if (NCH(n) == 2) {
+            return n_ifs;
+        }
+        n = CHILD(n, 2);
+    }
+}
+
+function ast_for_comprehension(c, n) {
+    var i, n_fors;
+    var comps = [];
+    n_fors = count_comp_fors(c, n);
+
+    for (i = 0; i < n_fors; i++) {
+        var comp;
+        var t;
+        var expression, first;
+        var for_ch;
+        var is_async = 0;
+
+        if (TYPE(CHILD(n, 0)) == TOK.T_ASYNC) {
+            is_async = 1;
+        }
+
+        for_ch = CHILD(n, 1 + is_async);
+        t = ast_for_exprlist(c, for_ch, Sk.astnodes. Store);
+        if (!t) {
+            return null;
+        }
+
+        expression = ast_for_expr(c, CHILD(n, 3 + is_async));
+
+        if (!expression) {
+            return null;
+        }
+
+        // again new grammar needed
+        // REQ(n, SYM.comp_for);
+
+        // if (NCH(n) == 2) {
+        //     is_async = 1;
+        //     REQ(CHILD(n, 0), TOK.T_ASYNC);
+        //     sync_n = CHILD(n, 1);
+        // }
+        // else {
+        //     sync_n = CHILD(n, 0);
+        // }
+        // REQ(sync_n, SYM.sync_comp_for);
+
+        // /* Async comprehensions only allowed in Python 3.6 and greater */
+        // /* @meredydd see below for the joys of the future! */
+        // if (is_async && c.c_feature_version < 6) {
+        //     ast_error(c, n,
+        //               "Async comprehensions are only supported in Python 3.6 and greater");
+        //     return null;
+        // }
+
+        // for_ch = CHILD(sync_n, 1);
+        // t = ast_for_exprlist(c, for_ch, Sk.astnodes.Store);
+
+        // expression = ast_for_expr(c, CHILD(sync_n, 3));
+
+        /* Check the # of children rather than the length of t, since
+           (x for x, in ...) has 1 element in t, but still requires a Tuple. */
+        first = t[0];
+        if (NCH(for_ch) == 1)
+            comp = new Sk.astnodes.comprehension(first, expression, null, is_async);
+        else
+            comp = new Sk.astnodes.comprehension(new Sk.astnodes.Tuple(t, Sk.astnodes.Store, first.lineno, first.col_offset,
+                                       for_ch.end_lineno, for_ch.end_col_offset),
+                                 expression, null, is_async);
+
+        if (NCH(n) == (5 + is_async)) {
+            var j, n_ifs;
+            var ifs = [];
+
+            n = CHILD(n, 4 + is_async);
+            n_ifs = count_comp_ifs(c, n);
+            if (n_ifs == -1) {
+                return null;
+            }
+
+            for (j = 0; j < n_ifs; j++) {
+                REQ(n, SYM.comp_iter);
+                n = CHILD(n, 0);
+                REQ(n, SYM.comp_if);
+
+                expression = ast_for_expr(c, CHILD(n, 1));
+                if (!expression) {
+                    return null;
+                }
+
+                ifs[j] = expression;
+                if (NCH(n) == 3) {
+                    n = CHILD(n, 2);
+                }
+            }
+            /* on exit, must guarantee that n is a comp_for */
+            if (TYPE(n) == SYM.comp_iter) {
+                n = CHILD(n, 0);
+            }
+            comp.ifs = ifs;
+        }
+        // if (NCH(sync_n) == 5) {
+        //     var j, n_ifs;
+        //     var ifs = [];
+
+        //     n = CHILD(sync_n, 4);
+        //     n_ifs = count_comp_ifs(c, n);
+
+        //     for (j = 0; j < n_ifs; j++) {
+        //         REQ(n, comp_iter);
+        //         n = CHILD(n, 0);
+        //         REQ(n, comp_if);
+
+        //         expression = ast_for_expr(c, CHILD(n, 1));
+        //         if (!expression) {
+        //             return null;
+        //         }
+
+        //         ifs[j] = expression;
+        //         if (NCH(n) == 3) {
+        //             n = CHILD(n, 2);
+        //         }
+        //     }
+        //     /* on exit, must guarantee that n is a comp_for */
+        //     if (TYPE(n) == SYM.comp_iter) {
+        //         n = CHILD(n, 0);
+        //     }
+        //     comp.ifs = ifs;
+        // }
+        comps[i] = comp;
+    }
+    return comps;
+}
+
+function ast_for_itercomp(c, n, type) {
+    /* testlist_comp: (test|star_expr)
+     *                ( comp_for | (',' (test|star_expr))* [','] ) */
+    var elt;
+    var comps;
+    var ch;
+
+    Sk.asserts.assert(NCH(n) > 1);
+
+    ch = CHILD(n, 0);
+    elt = ast_for_expr(c, ch);
+
+    if (elt.constructor === Sk.astnodes.Starred) {
+        ast_error(c, ch, "iterable unpacking cannot be used in comprehension");
+        return NULL;
+    }
+
+    comps = ast_for_comprehension(c, CHILD(n, 1));
+
+    if (type == COMP_GENEXP) {
+        return new Sk.astnodes.GeneratorExp(elt, comps, LINENO(n), n.col_offset,
+                            n.end_lineno, n.end_col_offset);
+    } else if (type == COMP_LISTCOMP) {
+        return new Sk.astnodes.ListComp(elt, comps, LINENO(n), n.col_offset,
+                        n.end_lineno, n.end_col_offset);
+    } else if (type == COMP_SETCOMP) {
+        return new Sk.astnodes.SetComp(elt, comps, LINENO(n), n.col_offset,
+                       n.end_lineno, n.end_col_offset);
+    } else {
+        /* Should never happen */
+        return null;
+    }
+}
+
+/* Fills in the key, value pair corresponding to the dict element.  In case
+ * of an unpacking, key is NULL.  *i is advanced by the number of ast
+ * elements.  Iff successful, nonzero is returned.
+ */
+function ast_for_dictelement(c, n, i)
+{
+    var expression;
+    if (TYPE(CHILD(n, i)) == TOK.T_DOUBLESTAR) {
+        Sk.asserts.assert(NCH(n) - i >= 2);
+
+        expression = ast_for_expr(c, CHILD(n, i + 1));
+
+        return { key: null, value: expression, i: i + 2 }
+    } else {
+        Sk.asserts.assert(NCH(n) - i >= 3);
+
+        expression = ast_for_expr(c, CHILD(n, i));
+        if (!expression)
+            return 0;
+        var key = expression;
+
+        REQ(CHILD(n, i + 1), TOK.T_COLON);
+
+        expression = ast_for_expr(c, CHILD(n, i + 2));
+        if (!expression) {
+            return false;
+        }
+
+        var value = expression;
+
+        return { key: key, value: value, i: i + 3 };
+    }
+}
+
+function ast_for_dictcomp(c, n) {
+    var key, value;
+    var comps = [];
+    Sk.asserts.assert(NCH(n) > 3);
+    REQ(CHILD(n, 1), TOK.T_COLON);
+    key = ast_for_expr(c, CHILD(n, 0));
+    value = ast_for_expr(c, CHILD(n, 2));
+    comps = astForComprehension(c, CHILD(n, 3));
+    return new Sk.astnodes.DictComp(key, value, comps, n.lineno, n.col_offset);
+}
+
+function ast_for_dictdisplay(c, n)
+{
+    var i;
+    var j;
+    var keys = [], values = [];
+
+    j = 0;
+    for (i = 0; i < NCH(n); i++) {
+        var res = ast_for_dictelement(c, n, i);
+        i = res.i
+        keys[j] = res.key;
+        values[j] = res.value;
+        j++;
+    }
+
+    return new Sk.astnodes.Dict(keys, values, LINENO(n), n.col_offset,
+                n.end_lineno, n.end_col_offset);
+}
+
+function ast_for_gen_expr(c, n) {
+    Sk.asserts.assert(n.type === SYM.testlist_comp || n.type === SYM.argument);
     return astForIterComp(c, n, COMP_GENEXP);
 }
 
-function astForSetComp(c, n) {
-    goog.asserts.assert(n.type === SYM.dictorsetmaker);
+function ast_for_setcomp(c, n) {
+    Sk.asserts.assert(n.type === SYM.dictorsetmaker);
     return astForIterComp(c, n, COMP_SETCOMP);
 }
 
@@ -1468,12 +1994,12 @@ function astForWhileStmt (c, n) {
     /* while_stmt: 'while' test ':' suite ['else' ':' suite] */
     REQ(n, SYM.while_stmt);
     if (NCH(n) === 4) {
-        return new While_(astForExpr(c, CHILD(n, 1)), astForSuite(c, CHILD(n, 3)), [], n.lineno, n.col_offset);
+        return new Sk.astnodes.While(ast_for_expr(c, CHILD(n, 1)), astForSuite(c, CHILD(n, 3)), [], n.lineno, n.col_offset);
     }
     else if (NCH(n) === 7) {
-        return new While_(astForExpr(c, CHILD(n, 1)), astForSuite(c, CHILD(n, 3)), astForSuite(c, CHILD(n, 6)), n.lineno, n.col_offset);
+        return new Sk.astnodes.While(ast_for_expr(c, CHILD(n, 1)), astForSuite(c, CHILD(n, 3)), astForSuite(c, CHILD(n, 6)), n.lineno, n.col_offset);
     }
-    goog.asserts.fail("wrong number of tokens for 'while' stmt");
+    Sk.asserts.fail("wrong number of tokens for 'while' stmt");
 }
 
 function astForAugassign (c, n) {
@@ -1481,33 +2007,37 @@ function astForAugassign (c, n) {
     n = CHILD(n, 0);
     switch (n.value.charAt(0)) {
         case "+":
-            return Add;
+            return Sk.astnodes.Add;
         case "-":
-            return Sub;
+            return Sk.astnodes.Sub;
         case "/":
             if (n.value.charAt(1) === "/") {
-                return FloorDiv;
+                return Sk.astnodes.FloorDiv;
             }
-            return Div;
+            return Sk.astnodes.Div;
         case "%":
-            return Mod;
+            return Sk.astnodes.Mod;
         case "<":
-            return LShift;
+            return Sk.astnodes.LShift;
         case ">":
-            return RShift;
+            return Sk.astnodes.RShift;
         case "&":
-            return BitAnd;
+            return Sk.astnodes.BitAnd;
         case "^":
-            return BitXor;
+            return Sk.astnodes.BitXor;
         case "|":
-            return BitOr;
+            return Sk.astnodes.BitOr;
         case "*":
             if (n.value.charAt(1) === "*") {
-                return Pow;
+                return Sk.astnodes.Pow;
             }
-            return Mult;
+            return Sk.astnodes.Mult;
+        case "@":
+            if (Sk.__future__.python3) {
+                return Sk.astnodes.MatMult;
+            }
         default:
-            goog.asserts.fail("invalid augassign");
+            Sk.asserts.fail("invalid augassign");
     }
 }
 
@@ -1520,49 +2050,43 @@ function astForBinop (c, n) {
     var newoperator;
     var nextOper;
     var i;
-    var result = new BinOp(
-        astForExpr(c, CHILD(n, 0)),
+    var result = new Sk.astnodes.BinOp(
+        ast_for_expr(c, CHILD(n, 0)),
         getOperator(CHILD(n, 1)),
-        astForExpr(c, CHILD(n, 2)),
+        ast_for_expr(c, CHILD(n, 2)),
         n.lineno, n.col_offset);
     var nops = (NCH(n) - 1) / 2;
     for (i = 1; i < nops; ++i) {
         nextOper = CHILD(n, i * 2 + 1);
         newoperator = getOperator(nextOper);
-        tmp = astForExpr(c, CHILD(n, i * 2 + 2));
-        result = new BinOp(result, newoperator, tmp, nextOper.lineno, nextOper.col_offset);
+        tmp = ast_for_expr(c, CHILD(n, i * 2 + 2));
+        result = new Sk.astnodes.BinOp(result, newoperator, tmp, nextOper.lineno, nextOper.col_offset);
     }
     return result;
-
 }
 
-
-function astForTestlist(c, n) {
-    /* this doesn't show up in Grammar.txt never did: testlist_gexp: test (',' test)* [','] */
-    /* testlist_comp: test (',' test)* [','] */
+function ast_for_testlist (c, n) {
+    /* testlist_comp: test (',' comp_for | (',' test)* [',']) */
     /* testlist: test (',' test)* [','] */
-    /* testlist_safe: test (',' test)+ [','] */
-    /* testlist1: test (',' test)* */
-    goog.asserts.assert(NCH(n) > 0);
+    Sk.asserts.assert(NCH(n) > 0);
     if (n.type === SYM.testlist_comp) {
         if (NCH(n) > 1) {
-            goog.asserts.assert(CHILD(n, 1).type !== SYM.comp_for);
+            Sk.asserts.assert(CHILD(n, 1).type !== SYM.comp_for);
         }
     }
     else {
-        goog.asserts.assert(n.type === SYM.testlist || n.type === SYM.testlist_safe || n.type === SYM.testlist1);
+        Sk.asserts.assert(n.type === SYM.testlist || n.type === SYM.testlist_star_expr);
     }
 
     if (NCH(n) === 1) {
-        return astForExpr(c, CHILD(n, 0));
+        return ast_for_expr(c, CHILD(n, 0));
     }
     else {
-        return new Tuple(seqForTestlist(c, n), Load, n.lineno, n.col_offset);
+        return new Sk.astnodes.Tuple(seq_for_testlist(c, n), Sk.astnodes.Load, n.lineno, n.col_offset/*, c.c_arena */);
     }
-
 }
 
-function astForExprStmt (c, n) {
+function ast_for_exprStmt (c, n) {
     var expression;
     var value;
     var e;
@@ -1572,46 +2096,103 @@ function astForExprStmt (c, n) {
     var varName;
     var expr1;
     var ch;
+    var ann;
+    var simple;
+    var deep;
+    var expr3;
     REQ(n, SYM.expr_stmt);
-    /* expr_stmt: testlist (augassign (yield_expr|testlist) 
-     | ('=' (yield_expr|testlist))*)
-     testlist: test (',' test)* [',']
-     augassign: '+=' | '-=' | '*=' | '/=' | '%=' | '&=' | '|=' | '^='
-     | '<<=' | '>>=' | '**=' | '//='
-     test: ... here starts the operator precendence dance
+    /* expr_stmt: testlist_star_expr (annassign | augassign (yield_expr|testlist) |
+                            ('=' (yield_expr|testlist_star_expr))*)
+       annassign: ':' test ['=' test]
+       testlist_star_expr: (test|star_expr) (',' test|star_expr)* [',']
+       augassign: '+=' | '-=' | '*=' | '@=' | '/=' | '%=' | '&=' | '|=' | '^='
+                | '<<=' | '>>=' | '**=' | '//='
+       test: ... here starts the operator precedence dance
      */
     if (NCH(n) === 1) {
-        return new Expr(astForTestlist(c, CHILD(n, 0)), n.lineno, n.col_offset);
+        return new Sk.astnodes.Expr(ast_for_testlist(c, CHILD(n, 0)), n.lineno, n.col_offset);
     }
     else if (CHILD(n, 1).type === SYM.augassign) {
         ch = CHILD(n, 0);
-        expr1 = astForTestlist(c, ch);
+        expr1 = ast_for_testlist(c, ch);
+        setContext(c, expr1, Sk.astnodes.Store, ch);
         switch (expr1.constructor) {
-            case GeneratorExp:
-                throw new Sk.builtin.SyntaxError("augmented assignment to generator expression not possible", c.c_filename, n.lineno);
-            case Yield:
-                throw new Sk.builtin.SyntaxError("augmented assignment to yield expression not possible", c.c_filename, n.lineno);
-            case Name:
+            case Sk.astnodes.Name:
                 varName = expr1.id;
                 forbiddenCheck(c, ch, varName, n.lineno);
                 break;
-            case Attribute:
-            case Subscript:
+            case Sk.astnodes.Attribute:
+            case Sk.astnodes.Subscript:
                 break;
+            case Sk.astnodes.GeneratorExp:
+                throw new Sk.builtin.SyntaxError("augmented assignment to generator expression not possible", c.c_filename, n.lineno);
+            case Sk.astnodes.Yield:
+                throw new Sk.builtin.SyntaxError("augmented assignment to yield expression not possible", c.c_filename, n.lineno);
             default:
                 throw new Sk.builtin.SyntaxError("illegal expression for augmented assignment", c.c_filename, n.lineno);
         }
-        setContext(c, expr1, Store, ch);
 
         ch = CHILD(n, 2);
         if (ch.type === SYM.testlist) {
-            expr2 = astForTestlist(c, ch);
+            expr2 = ast_for_testlist(c, ch);
         }
         else {
-            expr2 = astForExpr(c, ch);
+            expr2 = ast_for_expr(c, ch);
         }
 
-        return new AugAssign(expr1, astForAugassign(c, CHILD(n, 1)), expr2, n.lineno, n.col_offset);
+        return new Sk.astnodes.AugAssign(expr1, astForAugassign(c, CHILD(n, 1)), expr2, n.lineno, n.col_offset);
+    }
+    else if (CHILD(n, 1).type === SYM.annassign) {
+        if (!Sk.__future__.python3) {
+            throw new Sk.builtin.SyntaxError("Annotated assignment is not supported in Python 2", c.c_filename, n.lineno);
+        }
+        // annotated assignment
+        ch = CHILD(n, 0);
+        ann = CHILD(n, 1);
+        simple = 1;
+        deep = ch;
+        while (NCH(deep) == 1) {
+            deep = CHILD(deep, 0);
+        }
+        if (NCH(deep) > 0 && TYPE(CHILD(deep, 0)) == TOK.T_LPAR) {
+            simple = 0;
+        }
+        expr1 = ast_for_testlist(c, ch);
+        switch (expr1.constructor) {
+            case Sk.astnodes.Name:
+                varName = expr1.id;
+                forbiddenCheck(c, ch, varName, n.lineno);
+                setContext(c, expr1, Sk.astnodes.Store, ch);
+                break;
+            case Sk.astnodes.Attribute:
+                varName = expr1.attr;
+                forbiddenCheck(c, ch, varName, n.lineno);
+                setContext(c, expr1, Sk.astnodes.Store, ch);
+                break;
+            case Sk.astnodes.Subscript:
+                setContext(c, expr1, Sk.astnodes.Store, ch);
+                break;
+            case Sk.astnodes.List:
+                throw new Sk.builtin.SyntaxError("only single target (not list) can be annotated", c.c_filename, n.lineno);
+            case Sk.astnodes.Tuple:
+                throw new Sk.builtin.SyntaxError("only single target (not tuple) can be annotated", c.c_filename, n.lineno);
+            default:
+                throw new Sk.builtin.SyntaxError("illegal target for annotation", c.c_filename, n.lineno);
+        }
+        
+        if (expr1.constructor != Sk.astnodes.Name) {
+            simple = 0;
+        }
+        
+        ch = CHILD(ann, 1);
+        expr2 = ast_for_expr(c, ch);
+        if (NCH(ann) == 2) {
+            return new Sk.astnodes.AnnAssign(expr1, expr2, null, simple, n.lineno, n.col_offset);
+        } else {
+            ch = CHILD(ann, 3);
+            expr3 = ast_for_expr(c, ch);
+            return new Sk.astnodes.AnnAssign(expr1, expr2, expr3, simple, n.lineno, n.col_offset);
+        }
     }
     else {
         // normal assignment
@@ -1622,28 +2203,28 @@ function astForExprStmt (c, n) {
             if (ch.type === SYM.yield_expr) {
                 throw new Sk.builtin.SyntaxError("assignment to yield expression not possible", c.c_filename, n.lineno);
             }
-            e = astForTestlist(c, ch);
-            setContext(c, e, Store, CHILD(n, i));
+            e = ast_for_testlist(c, ch);
+            setContext(c, e, Sk.astnodes.Store, CHILD(n, i));
             targets[i / 2] = e;
         }
         value = CHILD(n, NCH(n) - 1);
-        if (value.type === SYM.testlist) {
-            expression = astForTestlist(c, value);
+        if (value.type === SYM.testlist_star_expr) {
+            expression = ast_for_testlist(c, value);
         }
         else {
-            expression = astForExpr(c, value);
+            expression = ast_for_expr(c, value);
         }
-        return new Assign(targets, expression, n.lineno, n.col_offset);
+        return new Sk.astnodes.Assign(targets, expression, n.lineno, n.col_offset);
     }
 }
 
 function astForIfexpr (c, n) {
     /* test: or_test 'if' or_test 'else' test */
-    goog.asserts.assert(NCH(n) === 5);
-    return new IfExp(
-        astForExpr(c, CHILD(n, 2)),
-        astForExpr(c, CHILD(n, 0)),
-        astForExpr(c, CHILD(n, 4)),
+    Sk.asserts.assert(NCH(n) === 5);
+    return new Sk.astnodes.IfExp(
+        ast_for_expr(c, CHILD(n, 2)),
+        ast_for_expr(c, CHILD(n, 0)),
+        ast_for_expr(c, CHILD(n, 4)),
         n.lineno, n.col_offset);
 }
 
@@ -1707,26 +2288,26 @@ function parsestr (c, s) {
                 else if (c === "x") {
                     d0 = s.charAt(++i);
                     d1 = s.charAt(++i);
-                    ret += String.fromCharCode(parseInt(d0 + d1, 16));
+                    ret += encodeUtf8(String.fromCharCode(parseInt(d0 + d1, 16)));
                 }
                 else if (c === "u" || c === "U") {
                     d0 = s.charAt(++i);
                     d1 = s.charAt(++i);
                     d2 = s.charAt(++i);
                     d3 = s.charAt(++i);
-                    ret += String.fromCharCode(parseInt(d0 + d1, 16), parseInt(d2 + d3, 16));
+                    ret += encodeUtf8(String.fromCharCode(parseInt(d0 + d1, 16), parseInt(d2 + d3, 16)));
                 }
                 else {
                     // Leave it alone
                     ret += "\\" + c;
-                    // goog.asserts.fail("unhandled escape: '" + c.charCodeAt(0) + "'");
+                    // Sk.asserts.fail("unhandled escape: '" + c.charCodeAt(0) + "'");
                 }
             }
             else {
                 ret += c;
             }
         }
-        return ret;
+        return decodeUtf8(ret);
     };
 
     //print("parsestr", s);
@@ -1737,7 +2318,7 @@ function parsestr (c, s) {
 
     // treats every sequence as unicodes even if they are not treated with uU prefix
     // kinda hacking though working for most purposes
-    if((c.c_flags & Parser.CO_FUTURE_UNICODE_LITERALS || Sk.python3 === true)) {
+    if((c.c_flags & Sk.Parser.CO_FUTURE_UNICODE_LITERALS || Sk.__future__.unicode_literals === true)) {
         unicode = true;
     }
 
@@ -1751,16 +2332,16 @@ function parsestr (c, s) {
         quote = s.charAt(0);
         rawmode = true;
     }
-    goog.asserts.assert(quote !== "b" && quote !== "B", "todo; haven't done b'' strings yet");
+    Sk.asserts.assert(quote !== "b" && quote !== "B", "todo; haven't done b'' strings yet");
 
-    goog.asserts.assert(quote === "'" || quote === '"' && s.charAt(s.length - 1) === quote);
+    Sk.asserts.assert(quote === "'" || quote === '"' && s.charAt(s.length - 1) === quote);
     s = s.substr(1, s.length - 2);
     if (unicode) {
         s = encodeUtf8(s);
     }
 
     if (s.length >= 4 && s.charAt(0) === quote && s.charAt(1) === quote) {
-        goog.asserts.assert(s.charAt(s.length - 1) === quote && s.charAt(s.length - 2) === quote);
+        Sk.asserts.assert(s.charAt(s.length - 1) === quote && s.charAt(s.length - 2) === quote);
         s = s.substr(2, s.length - 4);
     }
 
@@ -1876,26 +2457,26 @@ function astForSlice (c, n) {
     upper = null;
     step = null;
     if (ch.type === TOK.T_DOT) {
-        return new Ellipsis();
+        return new Sk.astnodes.Ellipsis();
     }
     if (NCH(n) === 1 && ch.type === SYM.test) {
-        return new Index(astForExpr(c, ch));
+        return new Sk.astnodes.Index(ast_for_expr(c, ch));
     }
     if (ch.type === SYM.test) {
-        lower = astForExpr(c, ch);
+        lower = ast_for_expr(c, ch);
     }
     if (ch.type === TOK.T_COLON) {
         if (NCH(n) > 1) {
             n2 = CHILD(n, 1);
             if (n2.type === SYM.test) {
-                upper = astForExpr(c, n2);
+                upper = ast_for_expr(c, n2);
             }
         }
     }
     else if (NCH(n) > 2) {
         n2 = CHILD(n, 2);
         if (n2.type === SYM.test) {
-            upper = astForExpr(c, n2);
+            upper = ast_for_expr(c, n2);
         }
     }
 
@@ -1903,24 +2484,190 @@ function astForSlice (c, n) {
     if (ch.type === SYM.sliceop) {
         if (NCH(ch) === 1) {
             ch = CHILD(ch, 0);
-            step = new Name(strobj("None"), Load, ch.lineno, ch.col_offset);
+            step = new Sk.astnodes.NameConstant(Sk.builtin.none.none$, Sk.astnodes.Load, ch.lineno, ch.col_offset);
         }
         else {
             ch = CHILD(ch, 1);
             if (ch.type === SYM.test) {
-                step = astForExpr(c, ch);
+                step = ast_for_expr(c, ch);
             }
         }
     }
-    return new Slice(lower, upper, step);
+    return new Sk.astnodes.Slice(lower, upper, step);
 }
 
+function ast_for_atom(c, n)
+{
+    /* atom: '(' [yield_expr|testlist_comp] ')' | '[' [testlist_comp] ']'
+       | '{' [dictmaker|testlist_comp] '}' | NAME | NUMBER | STRING+
+       | '...' | 'None' | 'True' | 'False'
+    */
+    var ch = CHILD(n, 0);
+
+    switch (TYPE(ch)) {
+        case TOK.T_NAME: {
+            var name;
+            var s = STR(ch);
+            if (s.length >= 4 && s.length <= 5) {
+                if (s === "None") {
+                    return new Sk.astnodes.NameConstant(Sk.builtin.none.none$, n.lineno, n.col_offset);
+                }
+
+                if (s === "True") {
+                    return new Sk.astnodes.NameConstant(Sk.builtin.bool.true$, n.lineno, n.col_offset);
+                }
+
+                if (s === "False") {
+                    return new Sk.astnodes.NameConstant(Sk.builtin.bool.false$, n.lineno, n.col_offset);
+                }
+            }
+            name = new_identifier(s, c);
+            /* All names start in Load context, but may later be changed. */
+            return new Sk.astnodes.Name(name, Sk.astnodes.Load, LINENO(n), n.col_offset,
+                        n.end_lineno, n.end_col_offset);
+        }
+        case TOK.T_STRING: {
+            var str = parsestrplus(c, n);
+            // if (!str) {
+            //     const char *errtype = NULL;
+            //     if (PyErr_ExceptionMatches(PyExc_UnicodeError))
+            //         errtype = "unicode error";
+            //     else if (PyErr_ExceptionMatches(PyExc_ValueError))
+            //         errtype = "value error";
+            //     if (errtype) {
+            //         PyObject *type, *value, *tback, *errstr;
+            //         PyErr_Fetch(&type, &value, &tback);
+            //         errstr = PyObject_Str(value);
+            //         if (errstr) {
+            //             ast_error(c, n, "(%s) %U", errtype, errstr);
+            //             Py_DECREF(errstr);
+            //         }
+            //         else {
+            //             PyErr_Clear();
+            //             ast_error(c, n, "(%s) unknown error", errtype);
+            //         }
+            //         Py_DECREF(type);
+            //         Py_XDECREF(value);
+            //         Py_XDECREF(tback);
+            //     }
+            //     return NULL;
+            // }
+            return new Sk.astnodes.Str(str, LINENO(n), n.col_offset, c.end_lineno, n.end_col_offset);
+        }
+        case TOK.T_NUMBER:
+            return new Sk.astnodes.Num(parsenumber(c, ch.value, n.lineno), n.lineno, n.col_offset);
+        case TOK.T_ELLIPSIS: /* Ellipsis */
+            return new Sk.astnodes.Ellipsis(LINENO(n), n.col_offset,
+                            n.end_lineno, n.end_col_offset);
+        case TOK.T_LPAR: /* some parenthesized expressions */
+            ch = CHILD(n, 1);
+
+            if (TYPE(ch) == TOK.T_RPAR)
+                return new Sk.astnodes.Tuple([], Sk.astnodes.Load, LINENO(n), n.col_offset,
+                            n.end_lineno, n.end_col_offset);
+
+            if (TYPE(ch) == SYM.yield_expr) {
+                return ast_for_expr(c, ch);
+            }
+
+            /* testlist_comp: test ( comp_for | (',' test)* [','] ) */
+            if (NCH(ch) == 1) {
+                return ast_for_testlist(c, ch);
+            }
+
+            if (TYPE(CHILD(ch, 1)) == SYM.comp_for) {
+                return copy_location(ast_for_genexp(c, ch), n);
+            }
+            else {
+                return copy_location(ast_for_testlist(c, ch), n);
+            }
+        case TOK.T_LSQB: /* list (or list comprehension) */
+            ch = CHILD(n, 1);
+
+            if (TYPE(ch) == TOK.T_RSQB)
+                return new Sk.astnodes.List([], Sk.astnodes.Load, LINENO(n), n.col_offset,
+                            n.end_lineno, n.end_col_offset);
+
+            REQ(ch, SYM.testlist_comp);
+            if (NCH(ch) == 1 || TYPE(CHILD(ch, 1)) == TOK.T_COMMA) {
+                var elts = seq_for_testlist(c, ch);
+                if (!elts) {
+                    return null;
+                }
+                return new Sk.astnodes.List(elts, Sk.astnodes.Load, LINENO(n), n.col_offset,
+                            n.end_lineno, n.end_col_offset);
+            }
+            else {
+                return copy_location(ast_for_listcomp(c, ch), n);
+            }
+        case TOK.T_LBRACE: {
+            /* dictorsetmaker: ( ((test ':' test | '**' test)
+            *                    (comp_for | (',' (test ':' test | '**' test))* [','])) |
+            *                   ((test | '*' test)
+            *                    (comp_for | (',' (test | '*' test))* [','])) ) */
+            var res;
+            ch = CHILD(n, 1);
+            if (TYPE(ch) == TOK.T_RBRACE) {
+                /* It's an empty dict. */
+                return new Sk.astnodes.Dict(null, null, LINENO(n), n.col_offset,
+                    n.end_lineno, n.end_col_offset);
+            }
+            else {
+                var is_dict = (TYPE(CHILD(ch, 0)) == TOK.T_DOUBLESTAR);
+                if (NCH(ch) == 1 ||
+                        (NCH(ch) > 1 &&
+                        TYPE(CHILD(ch, 1)) == TOK.T_COMMA)) {
+                    /* It's a set display. */
+                    res = ast_for_setdisplay(c, ch);
+                }
+                else if (NCH(ch) > 1 &&
+                        TYPE(CHILD(ch, 1)) == SYM.comp_for) {
+                    /* It's a set comprehension. */
+                    res = ast_for_setcomp(c, ch);
+                }
+                else if (NCH(ch) > 3 - is_dict &&
+                        TYPE(CHILD(ch, 3 - is_dict)) == SYM.comp_for) {
+                    /* It's a dictionary comprehension. */
+                    if (is_dict) {
+                        ast_error(c, n,
+                                "dict unpacking cannot be used in dict comprehension");
+                        return null;
+                    }
+                    res = ast_for_dictcomp(c, ch);
+                }
+                else {
+                    /* It's a dictionary display. */
+                    res = ast_for_dictdisplay(c, ch);
+                }
+                return copy_location(res, n);
+            }
+        }
+        default:
+            Sk.assert.fail("unhandled atom " + TYPE(ch));
+            return null;
+    }
+}
+
+function ast_for_setdisplay(c, n) {
+    var i;
+    var elts = [];
+
+    Sk.asserts.assert(TYPE(n) === SYM.dictorsetmaker);
+
+    for (i = 0; i < NCH(n); i += 2) {
+        var expression;
+        expression = ast_for_expr(c, CHILD(n, i));
+        elts[i / 2] = expression;
+    }
+
+    return new Sk.astnodes.Set(elts, LINENO(n), n.col_offset);
+}
+
+
 function astForAtom(c, n) {
-    /* atom: ('(' [yield_expr|testlist_comp] ')' |
-       '[' [listmaker] ']' |
-       '{' [dictorsetmaker] '}' |
-       '`' testlist1 '`' |
-       NAME | NUMBER | STRING+)
+    /* atom: '(' [yield_expr|testlist_comp] ')' | '[' [testlist_comp] ']'
+       | '{' [dictmaker|testlist_comp] '}' | NAME | NUMBER | STRING+
+       | '...' | 'None' | 'True' | 'False'
     */
     var i;
     var values;
@@ -1930,37 +2677,55 @@ function astForAtom(c, n) {
     var elts;
     switch (ch.type) {
         case TOK.T_NAME:
+            var s = ch.value;
             // All names start in Load context, but may be changed later
-            return new Name(strobj(ch.value), Load, n.lineno, n.col_offset);
+            if (s.length >= 4 && s.length <= 5) {
+                if (s === "None") {
+                    return new Sk.astnodes.NameConstant(Sk.builtin.none.none$, n.lineno, n.col_offset /* c.c_arena*/);
+                }
+
+                if (s === "True") {
+                    return new Sk.astnodes.NameConstant(Sk.builtin.bool.true$, n.lineno, n.col_offset /* c.c_arena*/);
+                }
+
+                if (s === "False") {
+                    return new Sk.astnodes.NameConstant(Sk.builtin.bool.false$, n.lineno, n.col_offset /* c.c_arena*/);
+                }
+
+            }
+            var name = new_identifier(s, c)
+
+            /* All names start in Load context, but may later be changed. */
+            return new Sk.astnodes.Name(name, Sk.astnodes.Load, n.lineno, n.col_offset);
         case TOK.T_STRING:
-            return new Str(parsestrplus(c, n), n.lineno, n.col_offset);
+            return new Sk.astnodes.Str(parsestrplus(c, n), n.lineno, n.col_offset);
         case TOK.T_NUMBER:
-            return new Num(parsenumber(c, ch.value, n.lineno), n.lineno, n.col_offset);
+            return new Sk.astnodes.Num(parsenumber(c, ch.value, n.lineno), n.lineno, n.col_offset);
         case TOK.T_LPAR: // various uses for parens
             ch = CHILD(n, 1);
             if (ch.type === TOK.T_RPAR) {
-                return new Tuple([], Load, n.lineno, n.col_offset);
+                return new Sk.astnodes.Tuple([], Sk.astnodes.Load, n.lineno, n.col_offset);
             }
             if (ch.type === SYM.yield_expr) {
-                return astForExpr(c, ch);
+                return ast_for_expr(c, ch);
             }
             //            if (NCH(ch) > 1 && CHILD(ch, 1).type === SYM.comp_for) {
             //                return astForComprehension(c, ch);
             //            }
-            return astForTestlistComp(c, ch);
+            return ast_for_testlistComp(c, ch);
         case TOK.T_LSQB: // list or listcomp
             ch = CHILD(n, 1);
             if (ch.type === TOK.T_RSQB) {
-                return new List([], Load, n.lineno, n.col_offset);
+                return new Sk.astnodes.List([], Sk.astnodes.Load, n.lineno, n.col_offset);
             }
             REQ(ch, SYM.listmaker);
             if (NCH(ch) === 1 || CHILD(ch, 1).type === TOK.T_COMMA) {
-                return new List(seqForTestlist(c, ch), Load, n.lineno, n.col_offset);
-            } 
-            return astForListcomp(c, ch);
-            
+                return new Sk.astnodes.List(seq_for_testlist(c, ch), Sk.astnodes.Load, n.lineno, n.col_offset);
+            }
+            return ast_for_listcomp(c, ch);
+
         case TOK.T_LBRACE:
-            /* dictorsetmaker: 
+            /* dictorsetmaker:
              *     (test ':' test (comp_for : (',' test ':' test)* [','])) |
              *     (test (comp_for | (',' test)* [',']))
              */
@@ -1969,40 +2734,89 @@ function astForAtom(c, n) {
             ch = CHILD(n, 1);
             if (n.type === TOK.T_RBRACE) {
                 //it's an empty dict
-                return new Dict([], null, n.lineno, n.col_offset);
-            } 
+                return new Sk.astnodes.Dict([], null, n.lineno, n.col_offset);
+            }
             else if (NCH(ch) === 1 || (NCH(ch) !== 0 && CHILD(ch, 1).type === TOK.T_COMMA)) {
                 //it's a simple set
                 elts = [];
                 size = Math.floor((NCH(ch) + 1) / 2);
                 for (i = 0; i < NCH(ch); i += 2) {
-                    var expression = astForExpr(c, CHILD(ch, i));
+                    var expression = ast_for_expr(c, CHILD(ch, i));
                     elts[i / 2] = expression;
                 }
-                return new Set(elts, n.lineno, n.col_offset);
-            } 
+                return new Sk.astnodes.Set(elts, n.lineno, n.col_offset);
+            }
             else if (NCH(ch) !== 0 && CHILD(ch, 1).type == SYM.comp_for) {
                 //it's a set comprehension
-                return astForSetComp(c, ch);
-            } 
+                return ast_for_setcomp(c, ch);
+            }
             else if (NCH(ch) > 3 && CHILD(ch, 3).type === SYM.comp_for) {
                 //it's a dict compr. I think.
-                return astForDictComp(c, ch);
-            } 
+                return ast_for_dictcomp(c, ch);
+            }
             else {
                 size = Math.floor((NCH(ch) + 1) / 4); // + 1 for no trailing comma case
                 for (i = 0; i < NCH(ch); i += 4) {
-                    keys[i / 4] = astForExpr(c, CHILD(ch, i));
-                    values[i / 4] = astForExpr(c, CHILD(ch, i + 2));
+                    keys[i / 4] = ast_for_expr(c, CHILD(ch, i));
+                    values[i / 4] = ast_for_expr(c, CHILD(ch, i + 2));
                 }
-                return new Dict(keys, values, n.lineno, n.col_offset);
+                return new Sk.astnodes.Dict(keys, values, n.lineno, n.col_offset);
             }
         case TOK.T_BACKQUOTE:
             //throw new Sk.builtin.SyntaxError("backquote not supported, use repr()", c.c_filename, n.lineno);
-            return new Repr(astForTestlist(c, CHILD(n, 1)), n.lineno, n.col_offset);
+            return new Sk.astnodes.Repr(ast_for_testlist(c, CHILD(n, 1)), n.lineno, n.col_offset);
         default:
-            goog.asserts.fail("unhandled atom", ch.type);
+            Sk.asserts.fail("unhandled atom", ch.type);
 
+    }
+}
+
+function astForAtomExpr(c, n) {
+    var i, nch, start = 0;
+    var e, tmp;
+
+    REQ(n, SYM.atom_expr);
+    nch = NCH(n);
+
+    if (CHILD(n, 0).type === TOK.T_AWAIT) {
+        start = 1;
+        Sk.asserts.assert(nch > 1);
+    }
+
+    e = ast_for_atom(c, CHILD(n, start));
+    if (!e) {
+        return null;
+    }
+
+    if (nch === 1) {
+        return e;
+    }
+
+    if (start && nch === 2) {
+        return new Sk.astnodes.Await(e, n.lineno, n.col_offset /*, c->c_arena*/);
+    }
+
+    for (i = start + 1; i < nch; i++) {
+        var ch = CHILD(n, i);
+        if (ch.type !== SYM.trailer) {
+            break;
+        }
+        tmp = ast_for_trailer(c, ch, e);
+        if (!tmp) {
+            return null;
+        }
+
+        tmp.lineno = e.lineno;
+        tmp.col_offset = e.col_offset;
+        e = tmp;
+    }
+
+    if (start) {
+        /* there was an AWAIT */
+        return new Sk.astnodes.Await(e, n.line, n.col_offset /*, c->c_arena*/);
+    }
+    else {
+        return e;
     }
 }
 
@@ -2015,30 +2829,29 @@ function astForPower (c, n) {
     var i;
     var e;
     REQ(n, SYM.power);
-    e = astForAtom(c, CHILD(n, 0));
+    e = astForAtomExpr(c, CHILD(n, 0));
     if (NCH(n) === 1) {
         return e;
     }
-    for (i = 1; i < NCH(n); ++i) {
-        ch = CHILD(n, i);
-        if (ch.type !== SYM.trailer) {
-            break;
-        }
-        tmp = astForTrailer(c, ch, e);
-        tmp.lineno = e.lineno;
-        tmp.col_offset = e.col_offset;
-        e = tmp;
-    }
     if (CHILD(n, NCH(n) - 1).type === SYM.factor) {
-        f = astForExpr(c, CHILD(n, NCH(n) - 1));
-        e = new BinOp(e, Pow, f, n.lineno, n.col_offset);
+        f = ast_for_expr(c, CHILD(n, NCH(n) - 1));
+        e = new Sk.astnodes.BinOp(e, Sk.astnodes.Pow, f, n.lineno, n.col_offset);
     }
     return e;
 }
 
-function astForExpr (c, n) {
-    /* handle the full range of simple expressions
+function astForStarred(c, n) {
+    REQ(n, SYM.star_expr);
+
+    /* The Load context is changed later */
+    return new Sk.astnodes.Starred(ast_for_expr(c, CHILD(n ,1)), Sk.astnodes.Load, n.lineno, n.col_offset /*, c.c_arena */)
+}
+
+function ast_for_expr (c, n) {
+    /*
+     handle the full range of simple expressions
      test: or_test ['if' or_test 'else' test] | lambdef
+     test_nocond: or_test | lambdef_nocond
      or_test: and_test ('or' and_test)*
      and_test: not_test ('and' not_test)*
      not_test: 'not' not_test | comparison
@@ -2050,17 +2863,10 @@ function astForExpr (c, n) {
      arith_expr: term (('+'|'-') term)*
      term: factor (('*'|'/'|'%'|'//') factor)*
      factor: ('+'|'-'|'~') factor | power
-     power: atom trailer* ('**' factor)*
-
-     As well as modified versions that exist for backward compatibility,
-     to explicitly allow:
-     [ x for x in lambda: 0, lambda: 1 ]
-     (which would be ambiguous without these extra rules)
-
-     old_test: or_test | old_lambdef
-     old_lambdef: 'lambda' [vararglist] ':' old_test
-
-     */
+     power: atom_expr ['**' factor]
+     atom_expr: [AWAIT] atom trailer*
+     yield_expr: 'yield' [yield_arg]
+    */
 
     var exp;
     var cmps;
@@ -2070,14 +2876,14 @@ function astForExpr (c, n) {
     LOOP: while (true) {
         switch (n.type) {
             case SYM.test:
-            case SYM.old_test:
-                if (CHILD(n, 0).type === SYM.lambdef || CHILD(n, 0).type === SYM.old_lambdef) {
+            case SYM.test_nocond:
+                if (CHILD(n, 0).type === SYM.lambdef || CHILD(n, 0).type === SYM.lambdef_nocond) {
                     return astForLambdef(c, CHILD(n, 0));
                 }
                 else if (NCH(n) > 1) {
                     return astForIfexpr(c, n);
                 }
-            // fallthrough
+                // fallthrough
             case SYM.or_test:
             case SYM.and_test:
                 if (NCH(n) === 1) {
@@ -2086,20 +2892,20 @@ function astForExpr (c, n) {
                 }
                 seq = [];
                 for (i = 0; i < NCH(n); i += 2) {
-                    seq[i / 2] = astForExpr(c, CHILD(n, i));
+                    seq[i / 2] = ast_for_expr(c, CHILD(n, i));
                 }
                 if (CHILD(n, 1).value === "and") {
-                    return new BoolOp(And, seq, n.lineno, n.col_offset);
+                    return new Sk.astnodes.BoolOp(Sk.astnodes.And, seq, n.lineno, n.col_offset /*, c.c_arena*/);
                 }
-                goog.asserts.assert(CHILD(n, 1).value === "or");
-                return new BoolOp(Or, seq, n.lineno, n.col_offset);
+                Sk.asserts.assert(CHILD(n, 1).value === "or");
+                return new Sk.astnodes.BoolOp(Sk.astnodes.Or, seq, n.lineno, n.col_offset);
             case SYM.not_test:
                 if (NCH(n) === 1) {
                     n = CHILD(n, 0);
                     continue LOOP;
                 }
                 else {
-                    return new UnaryOp(Not, astForExpr(c, CHILD(n, 1)), n.lineno, n.col_offset);
+                    return new Sk.astnodes.UnaryOp(Sk.astnodes.Not, ast_for_expr(c, CHILD(n, 1)), n.lineno, n.col_offset);
                 }
                 break;
             case SYM.comparison:
@@ -2112,11 +2918,17 @@ function astForExpr (c, n) {
                     cmps = [];
                     for (i = 1; i < NCH(n); i += 2) {
                         ops[(i - 1) / 2] = astForCompOp(c, CHILD(n, i));
-                        cmps[(i - 1) / 2] = astForExpr(c, CHILD(n, i + 1));
+                        cmps[(i - 1) / 2] = ast_for_expr(c, CHILD(n, i + 1));
                     }
-                    return new Compare(astForExpr(c, CHILD(n, 0)), ops, cmps, n.lineno, n.col_offset);
+                    return new Sk.astnodes.Compare(ast_for_expr(c, CHILD(n, 0)), ops, cmps, n.lineno, n.col_offset);
                 }
                 break;
+            case SYM.star_expr:
+                return astForStarred(c, n);
+            /* The next fize cases all handle BinOps  The main body of code
+               is the same in each case, but the switch turned inside out to
+               reuse the code for each type of operator
+             */
             case SYM.expr:
             case SYM.xor_expr:
             case SYM.and_expr:
@@ -2129,11 +2941,29 @@ function astForExpr (c, n) {
                 }
                 return astForBinop(c, n);
             case SYM.yield_expr:
+                var an;
+                var en
+                var is_from = false;
                 exp = null;
-                if (NCH(n) === 2) {
-                    exp = astForTestlist(c, CHILD(n, 1));
+                if (NCH(n) > 1) {
+                    an = CHILD(n, 1); /* yield_arg */
                 }
-                return new Yield(exp, n.lineno, n.col_offset);
+
+                if (an) {
+                    en = CHILD(an, NCH(an) - 1);
+                    if (NCH(an) == 2) {
+                        is_from = true;
+                        exp = ast_for_expr(c, en);
+                    } else {
+                        exp = ast_for_testlist(c, en);
+                    }
+                }
+
+                if (is_from) {
+                    return new Sk.astnodes.YieldFrom(exp, n.lineno, n.col_offset);
+                }
+
+                return new Sk.astnodes.Yield(exp, n.lineno, n.col_offset);
             case SYM.factor:
                 if (NCH(n) === 1) {
                     n = CHILD(n, 0);
@@ -2143,13 +2973,27 @@ function astForExpr (c, n) {
             case SYM.power:
                 return astForPower(c, n);
             default:
-                goog.asserts.fail("unhandled expr", "n.type: %d", n.type);
+                Sk.asserts.fail("unhandled expr", "n.type: %d", n.type);
         }
         break;
     }
 }
 
+function astForNonLocalStmt(c, n) {
+    ast_error(c, n, "Not implemented: nonlocal");
+}
+
+function astForAsyncStmt(c, n) {
+    ast_error(c, n, "Not implemented: async");
+}
+
+// This is only used for Python 2 support.
 function astForPrintStmt (c, n) {
+
+    if (Sk.__future__.print_function) {
+        ast_error(c, n, "Missing parentheses in call to 'print'");
+    }
+
     /* print_stmt: 'print' ( [ test (',' test)* [','] ]
      | '>>' test [ (',' test)+ [','] ] )
      */
@@ -2160,62 +3004,61 @@ function astForPrintStmt (c, n) {
     var dest = null;
     REQ(n, SYM.print_stmt);
     if (NCH(n) >= 2 && CHILD(n, 1).type === TOK.T_RIGHTSHIFT) {
-        dest = astForExpr(c, CHILD(n, 2));
+        dest = ast_for_expr(c, CHILD(n, 2));
         start = 4;
     }
     seq = [];
     for (i = start, j = 0; i < NCH(n); i += 2, ++j) {
-        seq[j] = astForExpr(c, CHILD(n, i));
+        seq[j] = ast_for_expr(c, CHILD(n, i));
     }
     nl = (CHILD(n, NCH(n) - 1)).type === TOK.T_COMMA ? false : true;
-    return new Print(dest, seq, nl, n.lineno, n.col_offset);
+    return new Sk.astnodes.Print(dest, seq, nl, n.lineno, n.col_offset);
 }
 
 function astForStmt (c, n) {
     var ch;
     if (n.type === SYM.stmt) {
-        goog.asserts.assert(NCH(n) === 1);
+        Sk.asserts.assert(NCH(n) === 1);
         n = CHILD(n, 0);
     }
     if (n.type === SYM.simple_stmt) {
-        goog.asserts.assert(numStmts(n) === 1);
+        Sk.asserts.assert(numStmts(n) === 1);
         n = CHILD(n, 0);
     }
     if (n.type === SYM.small_stmt) {
-        REQ(n, SYM.small_stmt);
         n = CHILD(n, 0);
-        /* small_stmt: expr_stmt | print_stmt  | del_stmt | pass_stmt
-         | flow_stmt | import_stmt | global_stmt | exec_stmt
-         | assert_stmt
-         */
+        /* small_stmt: expr_stmt | del_stmt | pass_stmt | flow_stmt
+                   | import_stmt | global_stmt | nonlocal_stmt | assert_stmt
+                   | debugger_stmt (skulpt special)
+        */
         switch (n.type) {
             case SYM.expr_stmt:
-                return astForExprStmt(c, n);
-            case SYM.print_stmt:
-                return astForPrintStmt(c, n);
+                return ast_for_exprStmt(c, n);
             case SYM.del_stmt:
                 return astForDelStmt(c, n);
             case SYM.pass_stmt:
-                return new Pass(n.lineno, n.col_offset);
+                return new Sk.astnodes.Pass(n.lineno, n.col_offset);
             case SYM.flow_stmt:
-                return astForFlowStmt(c, n);
+                return ast_for_flow_stmt(c, n);
             case SYM.import_stmt:
                 return astForImportStmt(c, n);
             case SYM.global_stmt:
                 return astForGlobalStmt(c, n);
-            case SYM.exec_stmt:
-                return astForExecStmt(c, n);
+            case SYM.nonlocal_stmt:
+                return astForNonLocalStmt(c, n);
             case SYM.assert_stmt:
                 return astForAssertStmt(c, n);
+            case SYM.print_stmt:
+                return astForPrintStmt(c, n);
             case SYM.debugger_stmt:
-                return new Debugger_(n.lineno, n.col_offset);
+                return new Sk.astnodes.Debugger(n.lineno, n.col_offset);
             default:
-                goog.asserts.fail("unhandled small_stmt");
+                Sk.asserts.fail("unhandled small_stmt");
         }
     }
     else {
         /* compound_stmt: if_stmt | while_stmt | for_stmt | try_stmt
-                        | funcdef | classdef | decorated
+                        | funcdef | classdef | decorated | async_stmt
         */
         ch = CHILD(n, 0);
         REQ(n, SYM.compound_stmt);
@@ -2229,18 +3072,20 @@ function astForStmt (c, n) {
             case SYM.try_stmt:
                 return astForTryStmt(c, ch);
             case SYM.with_stmt:
-                return astForWithStmt(c, ch);
+                return ast_for_with_stmt(c, ch);
             case SYM.funcdef:
-                return astForFuncdef(c, ch, []);
+                return ast_for_funcdef(c, ch, []);
             case SYM.classdef:
                 return astForClassdef(c, ch, []);
             case SYM.decorated:
-                return astForDecorated(c, ch);
+                return ast_for_decorated(c, ch);
+            case SYM.async_stmt:
+                return astForAsyncStmt(c, ch);
             default:
-                goog.asserts.assert("unhandled compound_stmt");
+                Sk.asserts.assert("unhandled compound_stmt");
         }
     }
-}
+};
 
 Sk.astFromParse = function (n, filename, c_flags) {
     var j;
@@ -2270,13 +3115,13 @@ Sk.astFromParse = function (n, filename, c_flags) {
                     }
                 }
             }
-            return new Module(stmts);
+            return new Sk.astnodes.Module(stmts);
         case SYM.eval_input:
-            goog.asserts.fail("todo;");
+            Sk.asserts.fail("todo;");
         case SYM.single_input:
-            goog.asserts.fail("todo;");
+            Sk.asserts.fail("todo;");
         default:
-            goog.asserts.fail("todo;");
+            Sk.asserts.fail("todo;");
     }
 };
 
@@ -2329,7 +3174,7 @@ Sk.astDump = function (node) {
             fieldstr = attrs.join(",\n" + indent + namelen);
             return indent + node._astname + "(" + fieldstr + ")";
         }
-        else if (goog.isArrayLike(node)) {
+        else if (Sk.isArrayLike(node)) {
             //Sk.debugout("arr", node.length);
             elems = [];
             for (i = 0; i < node.length; ++i) {
@@ -2362,5 +3207,5 @@ Sk.astDump = function (node) {
     return _format(node, "");
 };
 
-goog.exportSymbol("Sk.astFromParse", Sk.astFromParse);
-goog.exportSymbol("Sk.astDump", Sk.astDump);
+Sk.exportSymbol("Sk.astFromParse", Sk.astFromParse);
+Sk.exportSymbol("Sk.astDump", Sk.astDump);

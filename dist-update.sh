@@ -1,4 +1,4 @@
-if [[ "$TRAVIS_PULL_REQUEST" == "false" && "$TRAVIS_TEST_RESULT" == "0" ]]; then
+if [[ "$TRAVIS_PULL_REQUEST" == "false" && "$TRAVIS_TEST_RESULT" == "0" && "$TRAVIS_BRANCH" == "master" ]]; then
   echo -e "Starting to update of dist folder\n"
   #configure git to commit as Travis
   git config --global user.email "travis@travis-ci.org"
@@ -38,8 +38,9 @@ if [[ "$TRAVIS_PULL_REQUEST" == "false" && "$TRAVIS_TEST_RESULT" == "0" ]]; then
     #build skulpt at this tag
     cd $HOME/skulpt
     git checkout tags/$TAG
+    echo -n "running npm install"
     npm install
-    npm run build-min
+    npm run build
     #create zip and tarbals
     cd dist
     tar -czf skulpt-latest.tar.gz *.js
@@ -54,6 +55,10 @@ if [[ "$TRAVIS_PULL_REQUEST" == "false" && "$TRAVIS_TEST_RESULT" == "0" ]]; then
     cd ..
     cp bower.json ../dist
     cp .bowerrc ../dist
+    npm run devbuild
+    cp dist/skulpt.js ../dist/skulpt.js
+    npm run build-es5
+    cp dist/skulpt.min.js ../dist/skulpt.es5.min.js
     #put the new version in the dist repository
     cd ../dist
     git add .
@@ -71,14 +76,18 @@ if [[ "$TRAVIS_PULL_REQUEST" == "false" && "$TRAVIS_TEST_RESULT" == "0" ]]; then
   #build skulpt
   cd skulpt
   git reset HEAD --hard
-  npm run build-min
+  npm install
+  npm run build
   cd dist
   cp *.js ../../dist/
 
   cd ..
   cp bower.json ../dist
   cp .bowerrc ../dist
-
+  npm run devbuild
+  cp dist/skulpt.js ../dist/skulpt.js
+  npm run build-es5
+  cp dist/skulpt.min.js ../dist/skulpt.es5.min.js
 
   #add, commit and push files to the dist repository
   cd ../dist
@@ -86,22 +95,6 @@ if [[ "$TRAVIS_PULL_REQUEST" == "false" && "$TRAVIS_TEST_RESULT" == "0" ]]; then
   git commit -m "Travis build $TRAVIS_BUILD_NUMBER pushed"
   git push -fq origin master > /dev/null
 
-  if [[ "$NEWTAG" == "true" ]]; then
-    echo "Download GAE"
-    wget http://googleappengine.googlecode.com/files/google_appengine_1.8.3.zip  -nv
-    unzip -qd ~/vendors google_appengine_1.8.3.zip
-      #stop if google appengine isn't installed.
-    if [ ! -f ~/vendors/google_appengine/appcfg.py ]; then
-        echo "can't find appcfg.py"
-        exit 1
-    fi
-    echo "Updating site"
-    cd $HOME/skulpt/doc
-    ~/vendors/google_appengine/appcfg.py --oauth2_refresh_token=${GAE_REFRESH} update ./
-    echo "Successfully updated skulpt.org"
-  fi
-
-  echo -e "Done magic with coverage\n"
 else
-  echo -e "Not updating dist folder because TRAVIS_PULL_REQUEST = $TRAVIS_PULL_REQUEST and TRAVIS_TEST_RESULT = $TRAVIS_TEST_RESULT"
+  echo -e "Not updating dist folder because TRAVIS_PULL_REQUEST = $TRAVIS_PULL_REQUEST and TRAVIS_TEST_RESULT = $TRAVIS_TEST_RESULT and TRAVIS_BRANCH $TRAVIS_BRANCH"
 fi

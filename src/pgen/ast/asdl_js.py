@@ -17,9 +17,9 @@ def get_c_type(name):
     This function special cases the default types provided by asdl:
     identifier, string, int, bool.
     """
-    # XXX ack!  need to figure out where Id is useful and where string
-    if isinstance(name, asdl.Id):
-        name = name.value
+    # # XXX ack!  need to figure out where Id is useful and where string
+    # if isinstance(name, asdl.TokenId):
+    #     name = name.value
     if name in asdl.builtin_types:
         return name
     else:
@@ -114,7 +114,7 @@ class TypeDefVisitor(EmitVisitor):
         for i in range(len(sum.types)):
             self.emit("/** @constructor */", depth);
             type = sum.types[i]
-            self.emit("function %s() {}" % type.name, depth)
+            self.emit("Sk.astnodes.%s = function %s() {}" % (type.name, type.name), depth)
         self.emit("", depth)
 
     def visitProduct(self, product, name, depth):
@@ -189,7 +189,7 @@ class PrototypeVisitor(EmitVisitor):
                 name = f.name
             # XXX should extend get_c_type() to handle this
             if f.seq:
-                if f.type.value in ('cmpop',):
+                if f.type in ('cmpop',):
                     ctype = "asdl_int_seq *"
                 else:
                     ctype = "asdl_seq *"
@@ -233,12 +233,11 @@ class FunctionVisitor(PrototypeVisitor):
         argstr = ", ".join(["/* {%s} */ %s" % (atype, aname)
                             for atype, aname, opt in args + attrs])
         emit("/** @constructor */")
-        emit("function %s(%s)" % (name, argstr))
+        emit("Sk.astnodes.%s = function %s(%s)" % (name, name, argstr))
         emit("{")
-        for argtype, argname, opt in args:
-            # XXX hack alert: false is allowed for a bool
-            if not opt and not (argtype == "bool" or argtype == "int"):
-                emit("goog.asserts.assert(%s !== null && %s !== undefined);" % (argname, argname), 1)
+        for argtype, argname, opt in attrs:
+            if not opt:
+                emit("Sk.asserts.assert(%s !== null && %s !== undefined);" % (argname, argname), 1)
 
         if union:
             self.emit_body_union(name, args, attrs)
@@ -297,8 +296,8 @@ class FieldNamesVisitor(PickleVisitor):
 
     def visitProduct(self, prod, name):
         if prod.fields:
-            self.emit('%s.prototype._astname = "%s";' % (name, cleanName(name)), 0)
-            self.emit("%s.prototype._fields = [" % name,0)
+            self.emit('Sk.astnodes.%s.prototype._astname = "%s";' % (name, cleanName(name)), 0)
+            self.emit("Sk.astnodes.%s.prototype._fields = [" % name,0)
             c = 0
             for f in prod.fields:
                 c += 1
@@ -308,15 +307,15 @@ class FieldNamesVisitor(PickleVisitor):
     def visitSum(self, sum, name):
         if is_simple(sum):
             for t in sum.types:
-                self.emit('%s.prototype._astname = "%s";' % (t.name, cleanName(t.name)), 0)
-                self.emit('%s.prototype._isenum = true;' % (t.name), 0)
+                self.emit('Sk.astnodes.%s.prototype._astname = "%s";' % (t.name, cleanName(t.name)), 0)
+                self.emit('Sk.astnodes.%s.prototype._isenum = true;' % (t.name), 0)
         else:
             for t in sum.types:
                 self.visitConstructor(t, name)
 
     def visitConstructor(self, cons, name):
-        self.emit('%s.prototype._astname = "%s";' % (cons.name, cleanName(cons.name)), 0)
-        self.emit("%s.prototype._fields = [" % cons.name, 0)
+        self.emit('Sk.astnodes.%s.prototype._astname = "%s";' % (cons.name, cleanName(cons.name)), 0)
+        self.emit("Sk.astnodes.%s.prototype._fields = [" % cons.name, 0)
         if cons.fields:
             c = 0
             for t in cons.fields:
@@ -366,6 +365,9 @@ def main(asdlfile, outputfile):
     f = open(outputfile, "wb")
 
     f.write(auto_gen_msg)
+    f.write("/* Object that holds all nodes */\n");
+    f.write("Sk.astnodes = {};\n\n");
+    
     c = ChainOfVisitors(TypeDefVisitor(f),
                         )
     c.visit(mod)
@@ -381,6 +383,8 @@ def main(asdlfile, outputfile):
         )
     v.visit(mod)
 
+    f.write('Sk.exportSymbol("Sk.astnodes", Sk.astnodes);\n');
+    
     f.close()
 
 if __name__ == "__main__":
