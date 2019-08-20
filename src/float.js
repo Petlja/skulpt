@@ -817,7 +817,13 @@ Sk.builtin.float_.prototype.__format__= function (obj, format_spec) {
     } else {
         formatstr = Sk.ffi.remapToJs(format_spec);
         if (formatstr !== "") {
-            throw new Sk.builtin.NotImplementedError("format spec is not yet implemented");
+            var regex = /([#0 +\-]+)?(\*|[0-9]+)?(\.(\*|[0-9]+))?[hlL]?([diouxXeEfFgGcrs%])/g;
+            var match = regex.exec(formatstr);
+            if (match[5] ) {
+                return new Sk.builtin.str(Sk.builtin.replFunc(obj, match[0], match[2], match[3], match[4], match[5]));
+            } else {
+                throw new Sk.builtin.NotImplementedError("format spec is not yet implemented");
+            }
         }
     }
 

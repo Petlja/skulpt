@@ -85,6 +85,7 @@ Files = [
         'src/list.js',
         'src/str.js',
         'src/formatting.js',
+        'src/formatutil.js',
         'src/tuple.js',
         'src/dict.js',
         'src/numtype.js',

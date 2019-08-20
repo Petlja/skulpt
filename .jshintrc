@@ -37,5 +37,6 @@
   /*** Environments ***/
   // Set each environment that you're using to `true`.
   "browser":      true,
-  "devel":        false
+  "devel":        false,
+  "node":         true
 }
